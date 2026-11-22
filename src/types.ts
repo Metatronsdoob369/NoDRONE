@@ -67,6 +67,10 @@ export interface RecordedClip {
   mode: string;
   createdAt: string;
   sizeMb: string;
+  cameraPath?: {
+    url: string;
+    name: string;
+  };
 }
 
 export type WeatherTileLayer =

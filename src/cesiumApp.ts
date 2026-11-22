@@ -22,6 +22,146 @@ const DEFAULT_ION_TOKEN = '';
 const STORAGE_KEY = 'cesium_splatmap_ion_token';
 const REDMOND_SPLAT_ASSET_ID = 4547222;
 
+interface RenderPathSample {
+  t?: number;
+  lat: number;
+  lon: number;
+  height: number;
+  heading: number;
+  pitch: number;
+  roll: number;
+  fovyDeg?: number | null;
+}
+
+interface LoadedRenderPath {
+  fileName: string;
+  site: string;
+  fps: number;
+  resolution: [number, number];
+  samples: RenderPathSample[];
+}
+
+interface ZipEntryInput {
+  name: string;
+  data: Uint8Array<ArrayBuffer>;
+}
+
+interface RenderZipPart {
+  url: string;
+  name: string;
+  frameStart: number;
+  frameEnd: number;
+  sizeBytes: number;
+}
+
+const RENDER_ZIP_PART_FRAMES = 300;
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function computeCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function buildStoreZipBlob(entries: ZipEntryInput[]): Blob {
+  const encoder = new TextEncoder();
+  const now = new Date();
+  const dosTime =
+    ((now.getHours() & 0x1f) << 11) |
+    ((now.getMinutes() & 0x3f) << 5) |
+    ((now.getSeconds() >> 1) & 0x1f);
+  const dosDate =
+    (((Math.max(1980, now.getFullYear()) - 1980) & 0x7f) << 9) |
+    (((now.getMonth() + 1) & 0x0f) << 5) |
+    (now.getDate() & 0x1f);
+
+  const localParts: BlobPart[] = [];
+  const centralParts: Uint8Array<ArrayBuffer>[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBytes = encoder.encode(entry.name);
+    const data = entry.data;
+    const crc = computeCrc32(data);
+    const size = data.byteLength;
+
+    // Local File Header (30 bytes + filename)
+    const localHeader = new Uint8Array(new ArrayBuffer(30 + nameBytes.length));
+    const lv = new DataView(localHeader.buffer);
+    lv.setUint32(0, 0x04034b50, true); // Local file header signature
+    lv.setUint16(4, 20, true); // Version needed (2.0)
+    lv.setUint16(6, 0x0800, true); // UTF-8 filename flag
+    lv.setUint16(8, 0, true); // Compression method 0 (store-only)
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+
+    localParts.push(localHeader, data);
+
+    // Central Directory File Header (46 bytes + filename)
+    const centralHeader = new Uint8Array(new ArrayBuffer(46 + nameBytes.length));
+    const cv = new DataView(centralHeader.buffer);
+    cv.setUint32(0, 0x02014b50, true); // Central directory signature
+    cv.setUint16(4, 20, true); // Version made by
+    cv.setUint16(6, 20, true); // Version needed
+    cv.setUint16(8, 0x0800, true); // UTF-8 filename flag
+    cv.setUint16(10, 0, true); // Compression method 0 (store-only)
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true); // Extra field length
+    cv.setUint16(32, 0, true); // Comment length
+    cv.setUint16(34, 0, true); // Disk number start
+    cv.setUint16(36, 0, true); // Internal file attributes
+    cv.setUint32(38, 0, true); // External file attributes
+    cv.setUint32(42, offset, true); // Relative offset of local header
+    centralHeader.set(nameBytes, 46);
+    centralParts.push(centralHeader);
+
+    offset += localHeader.byteLength + size;
+  }
+
+  let centralDirSize = 0;
+  for (const ch of centralParts) {
+    centralDirSize += ch.byteLength;
+  }
+
+  // End of Central Directory Record (22 bytes)
+  const eocd = new Uint8Array(new ArrayBuffer(22));
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, centralDirSize, true);
+  ev.setUint32(16, offset, true);
+  ev.setUint16(20, 0, true);
+
+  return new Blob([...localParts, ...centralParts, eocd], { type: 'application/zip' });
+}
+
 export function initNoDroneCesiumApp(): NoDroneController | null {
   const Cesium = window.Cesium;
   if (!Cesium) {
@@ -72,9 +212,20 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
   let recordedChunks: Blob[] = [];
   let isRecording = false;
   let recordingStartMs = 0;
+// NoDRONE camera path log: one sample per rendered frame while recording
+let cameraPathSamples: any[] = [];
+let cameraPathRemove: (() => void) | null = null;
   let recordingTimerHandle: number | null = null;
   let recordingModeLabel = 'Free Flight';
   let recordedClips: RecordedClip[] = [];
+
+  // Offline Render Path State
+  let loadedRenderPath: LoadedRenderPath | null = null;
+  let isRenderingPath = false;
+  let renderPathCancelled = false;
+  let renderZipParts: RenderZipPart[] = [];
+  const supportsDirectoryPicker =
+    typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
 
   // 3D Surface Measurement State
   let measureMode: MeasureMode = 'off';
@@ -118,6 +269,14 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
   const bookmarkListEl = el<HTMLDivElement>('bookmark-list');
   const clipListEl = el<HTMLDivElement>('clip-list');
   const manifestFileInput = el<HTMLInputElement>('input-manifest-file');
+  const renderPathFileInput = el<HTMLInputElement>('input-render-path-file');
+  const renderPathStatusEl = el<HTMLSpanElement>('render-path-status');
+  const btnRenderFrames = el<HTMLButtonElement>('btn-render-frames');
+  const btnRenderToFolder = el<HTMLButtonElement>('btn-render-to-folder');
+  const renderZipPartsList = el<HTMLDivElement>('render-zip-parts-list');
+  const renderProgressOverlay = el<HTMLDivElement>('render-progress-overlay');
+  const renderProgressText = el<HTMLSpanElement>('render-progress-text');
+  const renderProgressBar = el<HTMLDivElement>('render-progress-bar');
   const toastContainer = el<HTMLDivElement>('toast-container');
   const flightHudBanner = el<HTMLDivElement>('flight-hud-banner');
   const flightHudLabel = el<HTMLSpanElement>('flight-hud-label');
@@ -518,6 +677,26 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
       recordingModeLabel = modeLabel;
       recordingStartMs = performance.now();
 
+      // Start logging the exact camera pose for every rendered frame
+      cameraPathSamples = [];
+      if (cameraPathRemove) cameraPathRemove();
+      cameraPathRemove = viewer.scene.postRender.addEventListener(() => {
+        if (!viewer) return;
+        const cam = viewer.camera;
+        const c = cam.positionCartographic;
+        const fr: any = cam.frustum;
+        cameraPathSamples.push({
+          t: +((performance.now() - recordingStartMs) / 1000).toFixed(4),
+          lon: Cesium.Math.toDegrees(c.longitude),
+          lat: Cesium.Math.toDegrees(c.latitude),
+          height: c.height,
+          heading: Cesium.Math.toDegrees(cam.heading),
+          pitch: Cesium.Math.toDegrees(cam.pitch),
+          roll: Cesium.Math.toDegrees(cam.roll),
+          fovyDeg: fr && fr.fovy ? Cesium.Math.toDegrees(fr.fovy) : null,
+        });
+      });
+
       mediaRecorder.ondataavailable = (ev: BlobEvent) => {
         if (ev.data && ev.data.size > 0) {
           recordedChunks.push(ev.data);
@@ -525,6 +704,34 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
       };
 
       mediaRecorder.onstop = () => {
+        // Stop the camera path log and attach it to the clip for download alongside WebM
+        if (cameraPathRemove) { cameraPathRemove(); cameraPathRemove = null; }
+        let cameraPath: { url: string; name: string } | undefined;
+        try {
+          const pathTitle = (el<HTMLInputElement>('input-site-title')?.value || 'nodrone').trim();
+          const slug = pathTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'nodrone';
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          const cv = viewer?.scene?.canvas as HTMLCanvasElement | undefined;
+          const pathDoc = {
+            schema: 'nodrone-camera-path/1',
+            site: pathTitle,
+            mode: recordingModeLabel,
+            recordedAt: new Date().toISOString(),
+            canvas: cv ? { width: cv.width, height: cv.height } : null,
+            heightReference: 'WGS84 ellipsoid (meters)',
+            angleUnits: 'degrees',
+            frameCount: cameraPathSamples.length,
+            samples: cameraPathSamples,
+          };
+          const pathBlob = new Blob([JSON.stringify(pathDoc)], { type: 'application/json' });
+          cameraPath = {
+            url: URL.createObjectURL(pathBlob),
+            name: `${slug}_camera-path_${stamp}.json`,
+          };
+          logEvent(`Camera path ready (${cameraPathSamples.length} frames) — saves with Download WebM.`, 'ok');
+        } catch (e: any) {
+          logEvent(`Camera path export failed: ${e?.message || e}`, 'error');
+        }
         const durationSec = Math.max(1, Math.round((performance.now() - recordingStartMs) / 1000));
         const blob = new Blob(recordedChunks, { type: chosenMime || 'video/webm' });
         const url = URL.createObjectURL(blob);
@@ -538,6 +745,7 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
           mode: recordingModeLabel,
           createdAt: new Date().toTimeString().slice(0, 8),
           sizeMb: (blob.size / (1024 * 1024)).toFixed(2),
+          ...(cameraPath ? { cameraPath } : {}),
         };
         recordedClips.unshift(clip);
         renderClipList();
@@ -586,6 +794,20 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
     clipModalDownload.href = clip.url;
     const safeName = clip.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
     clipModalDownload.download = `${safeName}.webm`;
+    clipModalDownload.onclick = clip.cameraPath
+      ? () => {
+          const path = clip.cameraPath;
+          if (!path) return;
+          window.setTimeout(() => {
+            const a = document.createElement('a');
+            a.href = path.url;
+            a.download = path.name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+          }, 300);
+        }
+      : null;
     clipModal.classList.remove('hidden');
   }
 
@@ -632,6 +854,7 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
       btnDel.textContent = '×';
       btnDel.addEventListener('click', () => {
         URL.revokeObjectURL(clip.url);
+        if (clip.cameraPath?.url) URL.revokeObjectURL(clip.cameraPath.url);
         recordedClips = recordedClips.filter((c) => c.id !== clip.id);
         renderClipList();
       });
@@ -640,6 +863,835 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
       row.append(info, actions);
       clipListEl.appendChild(row);
     });
+  }
+
+  function formatEtaSeconds(totalSec: number): string {
+    if (!Number.isFinite(totalSec) || totalSec < 0) return '--:--';
+    const sec = Math.ceil(totalSec);
+    const mins = Math.floor(sec / 60);
+    const rem = sec % 60;
+    return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+  }
+
+  function formatFileSizeMb(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0.0 MB';
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function renderZipPartsUI(): void {
+    if (!renderZipPartsList) return;
+    renderZipPartsList.innerHTML = '';
+    if (renderZipParts.length === 0) {
+      renderZipPartsList.classList.add('hidden');
+      return;
+    }
+    renderZipPartsList.classList.remove('hidden');
+
+    for (const part of renderZipParts) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className =
+        'w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white transition-colors cursor-pointer shadow-lg shadow-emerald-600/20';
+      const label = document.createElement('span');
+      label.className = 'truncate';
+      label.textContent =
+        renderZipParts.length === 1
+          ? `Download Render (${part.name})`
+          : `Download ${part.name}`;
+      const meta = document.createElement('span');
+      meta.className = 'font-mono text-[10px] text-emerald-100/90 shrink-0 tabular-nums';
+      meta.textContent = `f${part.frameStart}–${part.frameEnd} · ${formatFileSizeMb(part.sizeBytes)}`;
+      btn.append(label, meta);
+      btn.addEventListener('click', () => {
+        const a = document.createElement('a');
+        a.href = part.url;
+        a.download = part.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
+      renderZipPartsList.appendChild(btn);
+    }
+  }
+
+  function updateRenderPathButtons(): void {
+    if (btnRenderFrames) {
+      btnRenderFrames.disabled = !loadedRenderPath || isRenderingPath;
+    }
+    if (btnRenderToFolder) {
+      if (supportsDirectoryPicker) {
+        btnRenderToFolder.classList.remove('hidden');
+        btnRenderToFolder.disabled = !loadedRenderPath || isRenderingPath;
+      } else {
+        btnRenderToFolder.classList.add('hidden');
+      }
+    }
+    renderZipPartsUI();
+  }
+
+  function clearRenderZipParts(): void {
+    for (const part of renderZipParts) {
+      if (part.url) URL.revokeObjectURL(part.url);
+    }
+    renderZipParts = [];
+    updateRenderPathButtons();
+  }
+
+  async function loadRenderPathFile(file: File): Promise<void> {
+    try {
+      const text = await file.text();
+      const raw = JSON.parse(text);
+      if (!raw || raw.schema !== 'nodrone-camera-path/1') {
+        throw new Error('Expected schema "nodrone-camera-path/1".');
+      }
+      if (!Array.isArray(raw.samples) || raw.samples.length === 0) {
+        throw new Error('Render path contains no samples.');
+      }
+
+      const samples: RenderPathSample[] = [];
+      for (let i = 0; i < raw.samples.length; i++) {
+        const s = raw.samples[i];
+        const lat = Number(s?.lat);
+        const lon = Number(s?.lon);
+        const height = Number(s?.height);
+        const heading = Number(s?.heading ?? 0);
+        const pitch = Number(s?.pitch ?? -35);
+        const roll = Number(s?.roll ?? 0);
+        if (![lat, lon, height, heading, pitch, roll].every((n) => Number.isFinite(n))) {
+          throw new Error(`Sample #${i + 1} has invalid numeric camera coordinates/angles.`);
+        }
+        const fovyRaw = s?.fovyDeg;
+        const fovyDeg =
+          fovyRaw !== null && fovyRaw !== undefined && Number.isFinite(Number(fovyRaw))
+            ? Number(fovyRaw)
+            : null;
+        samples.push({
+          t: Number.isFinite(Number(s?.t)) ? Number(s.t) : undefined,
+          lat,
+          lon,
+          height,
+          heading,
+          pitch,
+          roll,
+          fovyDeg,
+        });
+      }
+
+      let resW = 1920;
+      let resH = 1080;
+      if (Array.isArray(raw.render?.resolution) && raw.render.resolution.length >= 2) {
+        const w = Math.round(Number(raw.render.resolution[0]));
+        const h = Math.round(Number(raw.render.resolution[1]));
+        if (Number.isFinite(w) && Number.isFinite(h) && w >= 64 && h >= 64 && w <= 7680 && h <= 4320) {
+          resW = w;
+          resH = h;
+        }
+      }
+
+      let fps = 30;
+      if (Number.isFinite(Number(raw.render?.fps)) && Number(raw.render.fps) > 0) {
+        fps = Number(raw.render.fps);
+      } else if (
+        samples.length >= 2 &&
+        typeof samples[0].t === 'number' &&
+        typeof samples[samples.length - 1].t === 'number'
+      ) {
+        const dt = samples[samples.length - 1].t! - samples[0].t!;
+        if (dt > 0) {
+          fps = Math.max(1, Math.min(120, Math.round((samples.length - 1) / dt)));
+        }
+      }
+
+      loadedRenderPath = {
+        fileName: file.name,
+        site: String(raw.site || el<HTMLInputElement>('input-site-title')?.value || 'nodrone').trim(),
+        fps,
+        resolution: [resW, resH],
+        samples,
+      };
+      clearRenderZipParts();
+
+      if (renderPathStatusEl) {
+        renderPathStatusEl.textContent = `${samples.length}f · ${resW}×${resH} · ${fps}fps`;
+        renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[170px]';
+      }
+      updateRenderPathButtons();
+      logEvent(`Loaded render path "${file.name}" (${samples.length} frames @ ${resW}×${resH}, ${fps} fps).`, 'ok');
+      showToast(`Render path loaded (${samples.length} frames)`);
+    } catch (err: any) {
+      logEvent(`Render path load failed: ${err?.message || err}`, 'error');
+      showToast(`Invalid render path JSON: ${err?.message || 'parse error'}`, 'error');
+    }
+  }
+
+  function areAllRenderSceneTilesLoaded(): boolean {
+    if (!viewer?.scene) return false;
+    const globe = viewer.scene.globe;
+    if (globe && globe.show !== false && globe.tilesLoaded !== true) {
+      return false;
+    }
+
+    if (google3DTileset && google3DTileset.show !== false && google3DTileset.tilesLoaded !== true) {
+      return false;
+    }
+
+    for (const item of activeTilesets) {
+      if (item.visible && item.tileset && item.tileset.show !== false && item.tileset.tilesLoaded !== true) {
+        return false;
+      }
+    }
+
+    const primitives = viewer.scene.primitives;
+    if (primitives && typeof primitives.length === 'number') {
+      for (let i = 0; i < primitives.length; i++) {
+        const p = primitives.get(i);
+        if (p && p.show !== false && typeof p.tilesLoaded === 'boolean' && p.tilesLoaded !== true) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  function waitForRenderFrameSettled(
+    timeoutMs = 15000
+  ): Promise<{ timedOut: boolean; waitMs: number; cancelled: boolean }> {
+    return new Promise((resolve) => {
+      const startMs = performance.now();
+      let consecutiveReady = 0;
+
+      const step = () => {
+        if (renderPathCancelled) {
+          resolve({ timedOut: false, waitMs: Math.round(performance.now() - startMs), cancelled: true });
+          return;
+        }
+        try {
+          viewer.scene.render();
+        } catch {
+          // ignore transient render warning and retry next rAF
+        }
+
+        if (areAllRenderSceneTilesLoaded()) {
+          consecutiveReady += 1;
+        } else {
+          consecutiveReady = 0;
+        }
+
+        const elapsed = performance.now() - startMs;
+        if (consecutiveReady >= 2) {
+          resolve({ timedOut: false, waitMs: Math.round(elapsed), cancelled: false });
+          return;
+        }
+        if (elapsed >= timeoutMs) {
+          resolve({ timedOut: true, waitMs: Math.round(elapsed), cancelled: false });
+          return;
+        }
+        window.requestAnimationFrame(step);
+      };
+
+      window.requestAnimationFrame(step);
+    });
+  }
+
+  function captureCanvasJpegBlob(canvas: HTMLCanvasElement, quality = 0.95): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error('Canvas JPEG capture returned null blob.'));
+        },
+        'image/jpeg',
+        quality
+      );
+    });
+  }
+
+  function computeAppliedFovRad(fovyDeg: number, width: number, height: number): number {
+    const fovyRad = Cesium.Math.toRadians(fovyDeg);
+    const fov =
+      width >= height
+        ? 2 * Math.atan(Math.tan(fovyRad / 2) * (width / height))
+        : fovyRad;
+    return Math.max(0.01, Math.min(Math.PI - 0.01, fov));
+  }
+
+  function isImageCanvasDrawable(
+    img: HTMLImageElement,
+    cache: Map<string, boolean>
+  ): boolean {
+    const key = img.currentSrc || img.src;
+    if (!key) return false;
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+    if (!img.complete || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+      return false;
+    }
+    try {
+      const probe = document.createElement('canvas');
+      probe.width = 2;
+      probe.height = 2;
+      const pctx = probe.getContext('2d');
+      if (!pctx) {
+        cache.set(key, false);
+        return false;
+      }
+      pctx.drawImage(img, 0, 0, 2, 2);
+      probe.toDataURL();
+      cache.set(key, true);
+      return true;
+    } catch {
+      cache.set(key, false);
+      return false;
+    }
+  }
+
+  function compositeCreditsOntoFrame(
+    ctx: CanvasRenderingContext2D,
+    targetW: number,
+    targetH: number,
+    container: HTMLElement,
+    logoSafetyCache: Map<string, boolean>
+  ): void {
+    const creditRoot =
+      (viewer?.cesiumWidget?.creditContainer as HTMLElement | undefined) ||
+      (container.querySelector('.cesium-widget-credits') as HTMLElement | null);
+
+    const drawableLogos: HTMLImageElement[] = [];
+    const textPieces: string[] = [];
+    const seen = new Set<string>();
+    const addText = (raw: string | null | undefined) => {
+      const clean = (raw || '').replace(/\s+/g, ' ').trim();
+      if (!clean) return;
+      if (/^data attribution$/i.test(clean)) return;
+      const key = clean.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      textPieces.push(clean);
+    };
+
+    let hasGoogleLogoDrawn = false;
+
+    if (creditRoot) {
+      const imgs = creditRoot.querySelectorAll('img');
+      imgs.forEach((img) => {
+        const style = window.getComputedStyle(img);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        const altOrTitle = (img.alt || img.title || '').trim();
+        if (isImageCanvasDrawable(img, logoSafetyCache)) {
+          drawableLogos.push(img);
+          if (/google/i.test(altOrTitle) || /google/i.test(img.currentSrc || img.src)) {
+            hasGoogleLogoDrawn = true;
+          }
+        } else if (altOrTitle) {
+          addText(altOrTitle);
+        }
+      });
+
+      const textContainer =
+        (creditRoot.querySelector('.cesium-credit-textContainer') as HTMLElement | null) || creditRoot;
+      const walker = document.createTreeWalker(textContainer, NodeFilter.SHOW_TEXT);
+      let node: Node | null;
+      while ((node = walker.nextNode())) {
+        const parentEl = node.parentElement;
+        if (parentEl) {
+          if (parentEl.closest('.cesium-credit-expand-link')) continue;
+          const st = window.getComputedStyle(parentEl);
+          if (st.display === 'none' || st.visibility === 'hidden') continue;
+        }
+        const val = (node.textContent || '').replace(/^\s*•\s*|\s*•\s*$/g, '').trim();
+        if (val && val !== '•' && val !== '|') {
+          addText(val);
+        }
+      }
+    }
+
+    if (google3DTileset && google3DTileset.show !== false && !hasGoogleLogoDrawn) {
+      const mentionsGoogle = textPieces.some((t) => /google/i.test(t));
+      if (!mentionsGoogle) {
+        textPieces.unshift('Google');
+      }
+    }
+    if (drawableLogos.length === 0 && textPieces.length === 0) {
+      textPieces.push('Cesium');
+    }
+
+    const fontSize = Math.max(11, Math.round(targetH * 0.0135));
+    const logoMaxH = Math.max(16, Math.round(targetH * 0.022));
+    const padX = Math.max(12, Math.round(targetW * 0.012));
+    const padY = Math.max(10, Math.round(targetH * 0.012));
+    const innerPadX = Math.max(8, Math.round(fontSize * 0.7));
+    const innerPadY = Math.max(5, Math.round(fontSize * 0.4));
+    const gap = Math.max(8, Math.round(fontSize * 0.65));
+
+    ctx.save();
+    ctx.font = `600 ${fontSize}px "Plus Jakarta Sans", system-ui, -apple-system, sans-serif`;
+    ctx.textBaseline = 'middle';
+
+    const logoDims = drawableLogos.map((img) => {
+      const ratio = img.naturalWidth / Math.max(1, img.naturalHeight);
+      const h = logoMaxH;
+      const w = Math.round(h * ratio);
+      return { img, w, h };
+    });
+
+    let totalLogosW = 0;
+    for (const ld of logoDims) {
+      totalLogosW += ld.w + gap;
+    }
+
+    const maxTextWidth = Math.max(160, targetW - padX * 2 - innerPadX * 2 - totalLogosW);
+    let attributionText = textPieces.join(' · ');
+    if (attributionText && ctx.measureText(attributionText).width > maxTextWidth) {
+      while (attributionText.length > 8 && ctx.measureText(`${attributionText}…`).width > maxTextWidth) {
+        attributionText = attributionText.slice(0, -1);
+      }
+      attributionText = `${attributionText.trimEnd()}…`;
+    }
+
+    const textW = attributionText ? Math.ceil(ctx.measureText(attributionText).width) : 0;
+    const contentW =
+      (totalLogosW > 0 ? totalLogosW - (textW > 0 ? 0 : gap) : 0) + textW;
+    const contentH = Math.max(logoDims.length > 0 ? logoMaxH : 0, Math.ceil(fontSize * 1.25));
+    const boxW = contentW + innerPadX * 2;
+    const boxH = contentH + innerPadY * 2;
+    const boxX = padX;
+    const boxY = targetH - padY - boxH;
+
+    // Subtle translucent dark backing so Cesium & Google credits remain legible on any terrain/sky
+    ctx.fillStyle = 'rgba(9, 9, 11, 0.56)';
+    ctx.beginPath();
+    const r = Math.min(6, Math.round(boxH * 0.22));
+    ctx.roundRect(boxX, boxY, boxW, boxH, r);
+    ctx.fill();
+
+    let cursorX = boxX + innerPadX;
+    const centerY = boxY + boxH / 2;
+
+    for (const ld of logoDims) {
+      ctx.drawImage(ld.img, cursorX, Math.round(centerY - ld.h / 2), ld.w, ld.h);
+      cursorX += ld.w + gap;
+    }
+
+    if (attributionText) {
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+      ctx.shadowBlur = 3;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 1;
+      ctx.fillStyle = 'rgba(244, 244, 245, 0.92)';
+      ctx.fillText(attributionText, cursorX, centerY);
+    }
+
+    ctx.restore();
+  }
+
+  async function renderLoadedPathFrames(dirHandle?: any): Promise<void> {
+    if (!viewer?.scene || !loadedRenderPath || isRenderingPath) return;
+    if (isRecording) {
+      showToast('Stop live recording before starting Render Frames.', 'error');
+      return;
+    }
+
+    const path = loadedRenderPath;
+    const total = path.samples.length;
+    const [targetW, targetH] = path.resolution;
+    const container = el<HTMLDivElement>('cesium-container');
+    if (!container) return;
+
+    isRenderingPath = true;
+    renderPathCancelled = false;
+    clearRenderZipParts();
+    updateRenderPathButtons();
+    setFlightMode('explore');
+
+    // Save camera, render loop, resolution settings, container/canvas styles, and HUD visibility
+    const savedUseDefaultLoop = viewer.useDefaultRenderLoop;
+    const savedUseBrowserRecommendedResolution = viewer.useBrowserRecommendedResolution;
+    const savedResolutionScale = viewer.resolutionScale;
+    const savedCameraPos = viewer.camera.position.clone();
+    const savedHeading = viewer.camera.heading;
+    const savedPitch = viewer.camera.pitch;
+    const savedRoll = viewer.camera.roll;
+    const savedFov =
+      viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number'
+        ? viewer.camera.frustum.fov
+        : null;
+
+    const canvas = viewer.scene.canvas as HTMLCanvasElement;
+    const savedCanvasStyle = {
+      width: canvas.style.width,
+      height: canvas.style.height,
+    };
+
+    const savedContainerStyle = {
+      position: container.style.position,
+      top: container.style.top,
+      left: container.style.left,
+      right: container.style.right,
+      bottom: container.style.bottom,
+      width: container.style.width,
+      height: container.style.height,
+      minWidth: container.style.minWidth,
+      minHeight: container.style.minHeight,
+      maxWidth: container.style.maxWidth,
+      maxHeight: container.style.maxHeight,
+    };
+
+    // Hide app HUD panels only — explicitly keep Cesium/Google credit container visible
+    const hudElements = [
+      document.querySelector('header') as HTMLElement | null,
+      weatherHud,
+      controlPanel,
+      healthPanel,
+      el<HTMLElement>('copilot-drawer'),
+      flightHudBanner,
+      recIndicator,
+      document.querySelector('nav') as HTMLElement | null,
+    ].filter((node): node is HTMLElement => Boolean(node));
+
+    const savedHudDisplays = hudElements.map((node) => ({
+      node,
+      display: node.style.display,
+    }));
+
+    const updateProgressUI = (currentFrame: number, timeoutsCount: number, etaText: string) => {
+      if (renderProgressText) {
+        renderProgressText.textContent = `Rendering frame ${currentFrame} / ${total} · timeouts ${timeoutsCount} · ETA ${etaText}`;
+      }
+      if (renderProgressBar) {
+        const pct = total > 0 ? Math.min(100, Math.round((currentFrame / total) * 100)) : 0;
+        renderProgressBar.style.width = `${pct}%`;
+      }
+    };
+
+    const startedAt = new Date().toISOString();
+    const renderStartMs = performance.now();
+    const perFrameWaitMs: number[] = [];
+    const perFrameFovRad: number[] = [];
+    const perFrameFovDeg: number[] = [];
+    const chunkEntries: ZipEntryInput[] = [];
+    let partIndex = 1;
+    let chunkStartFrame = 1;
+    let renderedFrames = 0;
+    let timeouts = 0;
+    let abortedWithError = false;
+
+    const flushZipPart = (frameEnd: number, includeLogBytes?: Uint8Array<ArrayBuffer>) => {
+      if (includeLogBytes) {
+        chunkEntries.push({
+          name: 'render-log.json',
+          data: includeLogBytes,
+        });
+      }
+      if (chunkEntries.length === 0) return;
+      const partName = `render_part${String(partIndex).padStart(2, '0')}.zip`;
+      const partBlob = buildStoreZipBlob(chunkEntries);
+      renderZipParts.push({
+        url: URL.createObjectURL(partBlob),
+        name: partName,
+        frameStart: chunkStartFrame,
+        frameEnd,
+        sizeBytes: partBlob.size,
+      });
+      // Release all raw frame buffers immediately after packing this part
+      chunkEntries.length = 0;
+      logEvent(
+        `Packed ${partName} (frames ${chunkStartFrame}–${frameEnd}, ${formatFileSizeMb(partBlob.size)}).`,
+        'info'
+      );
+      partIndex += 1;
+      chunkStartFrame = frameEnd + 1;
+      renderZipPartsUI();
+    };
+
+    try {
+      // Hide app HUD panels and show floating progress/cancel bar (keep Cesium/Google credits visible)
+      for (const { node } of savedHudDisplays) {
+        node.style.display = 'none';
+      }
+      if (renderProgressOverlay) {
+        renderProgressOverlay.classList.remove('hidden');
+        renderProgressOverlay.classList.add('flex');
+      }
+      updateProgressUI(0, 0, '--:--');
+
+      // Force output pixels to exact render.resolution regardless of devicePixelRatio
+      const dpr = window.devicePixelRatio || 1;
+      viewer.useDefaultRenderLoop = false;
+      viewer.useBrowserRecommendedResolution = false;
+      viewer.resolutionScale = 1 / dpr;
+
+      container.style.position = 'fixed';
+      container.style.top = '0px';
+      container.style.left = '0px';
+      container.style.right = 'auto';
+      container.style.bottom = 'auto';
+      container.style.width = `${targetW}px`;
+      container.style.height = `${targetH}px`;
+      container.style.minWidth = `${targetW}px`;
+      container.style.minHeight = `${targetH}px`;
+      container.style.maxWidth = 'none';
+      container.style.maxHeight = 'none';
+      viewer.resize();
+
+      // Wait one animation frame for DOM layout & Cesium canvas resize to take effect
+      await new Promise<void>((r) => window.requestAnimationFrame(() => r()));
+      viewer.resize();
+
+      // Explicitly pin canvas CSS and backing store dimensions to eliminate fractional DPR rounding drift
+      canvas.style.width = `${targetW}px`;
+      canvas.style.height = `${targetH}px`;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
+        viewer.camera.frustum.aspectRatio = targetW / targetH;
+      }
+
+      // Assert exact output pixel dimensions before frame 1; abort with a clear error if mismatched
+      const gl = viewer.scene?.context?._gl as WebGLRenderingContext | WebGL2RenderingContext | undefined;
+      const drawingW = gl ? gl.drawingBufferWidth : canvas.width;
+      const drawingH = gl ? gl.drawingBufferHeight : canvas.height;
+      if (
+        canvas.width !== targetW ||
+        canvas.height !== targetH ||
+        drawingW !== targetW ||
+        drawingH !== targetH
+      ) {
+        throw new Error(
+          `Canvas resolution mismatch before frame 1: expected ${targetW}×${targetH}, got canvas ${canvas.width}×${canvas.height} (WebGL buffer ${drawingW}×${drawingH}, dpr=${dpr}). Aborting render.`
+        );
+      }
+
+      // Reusable 1:1 offscreen 2D canvas for compositing Cesium/Google attribution onto captured frames
+      const outputCanvas = document.createElement('canvas');
+      outputCanvas.width = targetW;
+      outputCanvas.height = targetH;
+      const outputCtx = outputCanvas.getContext('2d');
+      const logoSafetyCache = new Map<string, boolean>();
+
+      const modeLabel = dirHandle ? 'folder' : `zip parts (${RENDER_ZIP_PART_FRAMES}f/part)`;
+      logEvent(
+        `Starting offline render (${total} frames @ ${targetW}×${targetH}, ${path.fps} fps, ${modeLabel})...`,
+        'info'
+      );
+
+      for (let i = 0; i < total; i++) {
+        if (renderPathCancelled) break;
+        const s = path.samples[i];
+
+        // Exact camera placement: no flyTo, no animation
+        viewer.camera.setView({
+          destination: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, s.height),
+          orientation: {
+            heading: Cesium.Math.toRadians(s.heading),
+            pitch: Cesium.Math.toRadians(s.pitch),
+            roll: Cesium.Math.toRadians(s.roll),
+          },
+        });
+
+        if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
+          viewer.camera.frustum.aspectRatio = targetW / targetH;
+        }
+
+        // Cesium PerspectiveFrustum.fovy is read-only; set frustum.fov instead
+        if (
+          typeof s.fovyDeg === 'number' &&
+          Number.isFinite(s.fovyDeg) &&
+          s.fovyDeg > 1 &&
+          s.fovyDeg < 175 &&
+          viewer.camera.frustum &&
+          typeof viewer.camera.frustum.fov === 'number'
+        ) {
+          viewer.camera.frustum.fov = computeAppliedFovRad(s.fovyDeg, targetW, targetH);
+        }
+
+        const appliedFov =
+          viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number'
+            ? Number(viewer.camera.frustum.fov)
+            : NaN;
+
+        const avgMs = i > 0 ? (performance.now() - renderStartMs) / i : NaN;
+        const etaBefore = Number.isFinite(avgMs) ? formatEtaSeconds(((total - i) * avgMs) / 1000) : '--:--';
+        updateProgressUI(i + 1, timeouts, etaBefore);
+
+        const settle = await waitForRenderFrameSettled(15000);
+        if (settle.cancelled || renderPathCancelled) break;
+        if (settle.timedOut) timeouts += 1;
+        perFrameWaitMs.push(settle.waitMs);
+        perFrameFovRad.push(Number.isFinite(appliedFov) ? Number(appliedFov.toFixed(6)) : 0);
+        perFrameFovDeg.push(
+          Number.isFinite(appliedFov) ? Number(Cesium.Math.toDegrees(appliedFov).toFixed(3)) : 0
+        );
+
+        // Final render immediately before reading WebGL backbuffer
+        viewer.scene.render();
+
+        let jpegBlob: Blob;
+        if (outputCtx) {
+          outputCtx.clearRect(0, 0, targetW, targetH);
+          outputCtx.drawImage(canvas, 0, 0, targetW, targetH);
+          compositeCreditsOntoFrame(outputCtx, targetW, targetH, container, logoSafetyCache);
+          try {
+            jpegBlob = await captureCanvasJpegBlob(outputCanvas, 0.95);
+          } catch {
+            jpegBlob = await captureCanvasJpegBlob(canvas, 0.95);
+          }
+        } else {
+          jpegBlob = await captureCanvasJpegBlob(canvas, 0.95);
+        }
+
+        const frameNum = String(i + 1).padStart(5, '0');
+        const frameFileName = `frame_${frameNum}.jpg`;
+
+        if (dirHandle) {
+          // Stream each frame straight to disk without holding blobs in memory
+          const fileHandle = await dirHandle.getFileHandle(frameFileName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(jpegBlob);
+          await writable.close();
+        } else {
+          const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
+          chunkEntries.push({
+            name: frameFileName,
+            data: jpegBytes,
+          });
+          // Flush a zip part every 300 frames and release raw frame buffers
+          if (chunkEntries.length >= RENDER_ZIP_PART_FRAMES && i < total - 1) {
+            flushZipPart(i + 1);
+          }
+        }
+
+        renderedFrames += 1;
+
+        const avgAfterMs = (performance.now() - renderStartMs) / renderedFrames;
+        const remainingFrames = total - renderedFrames;
+        const etaAfter = remainingFrames > 0 ? formatEtaSeconds((remainingFrames * avgAfterMs) / 1000) : '00:00';
+        updateProgressUI(renderedFrames, timeouts, etaAfter);
+      }
+    } catch (err: any) {
+      abortedWithError = true;
+      chunkEntries.length = 0;
+      logEvent(`Render Path error: ${err?.message || err}`, 'error');
+      showToast(`Render aborted: ${err?.message || 'unknown error'}`, 'error');
+    } finally {
+      // Restore canvas & container dimensions, pixel scale, render loop, camera, and HUD panels
+      canvas.style.width = savedCanvasStyle.width;
+      canvas.style.height = savedCanvasStyle.height;
+
+      container.style.position = savedContainerStyle.position;
+      container.style.top = savedContainerStyle.top;
+      container.style.left = savedContainerStyle.left;
+      container.style.right = savedContainerStyle.right;
+      container.style.bottom = savedContainerStyle.bottom;
+      container.style.width = savedContainerStyle.width;
+      container.style.height = savedContainerStyle.height;
+      container.style.minWidth = savedContainerStyle.minWidth;
+      container.style.minHeight = savedContainerStyle.minHeight;
+      container.style.maxWidth = savedContainerStyle.maxWidth;
+      container.style.maxHeight = savedContainerStyle.maxHeight;
+
+      viewer.useBrowserRecommendedResolution = savedUseBrowserRecommendedResolution;
+      viewer.resolutionScale = savedResolutionScale;
+      viewer.resize();
+
+      viewer.camera.setView({
+        destination: savedCameraPos,
+        orientation: {
+          heading: savedHeading,
+          pitch: savedPitch,
+          roll: savedRoll,
+        },
+      });
+      if (savedFov !== null && viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
+        viewer.camera.frustum.fov = savedFov;
+      }
+
+      viewer.useDefaultRenderLoop = savedUseDefaultLoop;
+      viewer.scene.render();
+
+      for (const { node, display } of savedHudDisplays) {
+        node.style.display = display;
+      }
+      if (renderProgressOverlay) {
+        renderProgressOverlay.classList.add('hidden');
+        renderProgressOverlay.classList.remove('flex');
+      }
+      isRenderingPath = false;
+    }
+
+    if (abortedWithError) {
+      updateRenderPathButtons();
+      return;
+    }
+
+    if (renderPathCancelled) {
+      chunkEntries.length = 0;
+      updateRenderPathButtons();
+      logEvent(`Render cancelled after ${renderedFrames} / ${total} frames.`, 'warn');
+      showToast('Render cancelled.');
+      return;
+    }
+
+    if (renderedFrames > 0) {
+      const finishedAt = new Date().toISOString();
+      const firstFovRad = perFrameFovRad.length > 0 ? perFrameFovRad[0] : null;
+      const firstFovDeg = perFrameFovDeg.length > 0 ? perFrameFovDeg[0] : null;
+      const renderLog = {
+        frameCount: renderedFrames,
+        fps: path.fps,
+        resolution: path.resolution,
+        timeouts,
+        fovRad: firstFovRad,
+        fovDeg: firstFovDeg,
+        perFrameFovRad,
+        perFrameFovDeg,
+        perFrameWaitMs,
+        startedAt,
+        finishedAt,
+        outputMode: dirHandle ? 'folder' : 'zip-parts',
+      };
+      const logJson = JSON.stringify(renderLog, null, 2);
+
+      if (dirHandle) {
+        try {
+          const logHandle = await dirHandle.getFileHandle('render-log.json', { create: true });
+          const writable = await logHandle.createWritable();
+          await writable.write(logJson);
+          await writable.close();
+        } catch (err: any) {
+          logEvent(`Failed to write render-log.json to folder: ${err?.message || err}`, 'error');
+        }
+        updateRenderPathButtons();
+        if (renderPathStatusEl) {
+          renderPathStatusEl.textContent = `Saved · ${renderedFrames}f · ${timeouts} timeout${timeouts === 1 ? '' : 's'}`;
+          renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[170px]';
+        }
+        logEvent(`Render complete: ${renderedFrames} frames, ${timeouts} timeouts.`, 'ok');
+        showToast(`Render complete (${renderedFrames} frames saved to folder).`);
+      } else {
+        const logBytes = new TextEncoder().encode(logJson);
+        const logBuf = new Uint8Array(new ArrayBuffer(logBytes.byteLength));
+        logBuf.set(logBytes);
+        flushZipPart(renderedFrames, logBuf);
+        updateRenderPathButtons();
+        if (renderPathStatusEl) {
+          const partsLabel = renderZipParts.length > 1 ? ` · ${renderZipParts.length} parts` : '';
+          renderPathStatusEl.textContent = `Ready · ${renderedFrames}f${partsLabel} · ${timeouts}t`;
+          renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[170px]';
+        }
+        logEvent(`Render complete: ${renderedFrames} frames, ${timeouts} timeouts.`, 'ok');
+        showToast(
+          renderZipParts.length > 1
+            ? `Render complete (${renderedFrames} frames in ${renderZipParts.length} zip parts).`
+            : `Render complete (${renderedFrames} frames). Click Download Render.`
+        );
+      }
+    } else {
+      updateRenderPathButtons();
+    }
   }
 
   function capturePngSnapshot(): boolean {
@@ -2472,6 +3524,49 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
       else startRecording(flightMode === 'orbit' ? '360° Orbit' : 'Aerial Capture');
     });
     el<HTMLButtonElement>('btn-stop-rec-banner')?.addEventListener('click', stopRecording);
+
+    // Offline Render Path Controls
+    updateRenderPathButtons();
+    el<HTMLButtonElement>('btn-load-render-path')?.addEventListener('click', () => {
+      if (!renderPathFileInput || isRenderingPath) return;
+      renderPathFileInput.value = '';
+      renderPathFileInput.click();
+    });
+    renderPathFileInput?.addEventListener('change', async (e) => {
+      const target = e.target as HTMLInputElement;
+      const file = target.files?.[0];
+      if (!file) return;
+      await loadRenderPathFile(file);
+    });
+    btnRenderFrames?.addEventListener('click', () => {
+      renderLoadedPathFrames();
+    });
+    btnRenderToFolder?.addEventListener('click', async () => {
+      if (!loadedRenderPath || isRenderingPath || !supportsDirectoryPicker) return;
+      if (isRecording) {
+        showToast('Stop live recording before starting Render to folder.', 'error');
+        return;
+      }
+      let dirHandle: any;
+      try {
+        dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+        const msg =
+          err?.name === 'SecurityError'
+            ? 'Folder picker blocked in this frame — use Render Frames (.zip parts) instead.'
+            : `Folder picker failed: ${err?.message || err}`;
+        logEvent(msg, 'error');
+        showToast(msg, 'error');
+        return;
+      }
+      await renderLoadedPathFrames(dirHandle);
+    });
+    el<HTMLButtonElement>('btn-cancel-render')?.addEventListener('click', () => {
+      if (isRenderingPath) {
+        renderPathCancelled = true;
+      }
+    });
 
     // Clip Playback Modal Controls
     const closeClipModal = () => {

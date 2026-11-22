@@ -6,14 +6,21 @@ import { attachCopilotLiveWebSocket } from './server/copilotLive';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
-  if (env.GEMINI_API_KEY) {
-    process.env.GEMINI_API_KEY = env.GEMINI_API_KEY;
-  }
-  if (env.API_KEY) {
-    process.env.API_KEY = env.API_KEY;
-  }
-  if (env.OPENWEATHERMAP_API_KEY) {
-    process.env.OPENWEATHERMAP_API_KEY = env.OPENWEATHERMAP_API_KEY;
+  const serverEnvKeys = [
+    'NOUS_API_KEY',
+    'NOUS_BASE_URL',
+    'NOUS_MODEL',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL',
+    'COPILOT_PROVIDER',
+    'GEMINI_API_KEY',
+    'API_KEY',
+    'OPENWEATHERMAP_API_KEY',
+  ];
+  for (const key of serverEnvKeys) {
+    if (!process.env[key] && env[key]) {
+      process.env[key] = env[key];
+    }
   }
 
   return {

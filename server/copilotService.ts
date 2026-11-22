@@ -308,6 +308,13 @@ export function buildSystemInstructionWithContext(context?: Record<string, unkno
   return `${COPILOT_SYSTEM_INSTRUCTION}\n\nLIVE VIEWER CONTEXT (JSON):\n${JSON.stringify(context)}`;
 }
 
+export type CopilotProviderId = 'nous' | 'anthropic' | 'gemini';
+
+export const DEFAULT_NOUS_BASE_URL = 'https://inference-api.nousresearch.com/v1';
+export const DEFAULT_NOUS_MODEL = 'google/gemini-4-hydrogen';
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-5';
+export const GEMINI_FALLBACK_FLASH_MODEL = 'gemini-2.5-flash';
+
 export interface CopilotTurnResult {
   text: string;
   functionCalls: Array<{
@@ -317,79 +324,568 @@ export interface CopilotTurnResult {
   }>;
   modelContent: Content | null;
   model: string;
+  provider?: CopilotProviderId;
 }
 
-export async function runCopilotTurn(
+function mapGeminiTypeToJsonSchema(typeVal: unknown): string {
+  const s = String(typeVal || 'object').toLowerCase();
+  if (s === 'integer') return 'integer';
+  if (s === 'number') return 'number';
+  if (s === 'boolean') return 'boolean';
+  if (s === 'array') return 'array';
+  if (s === 'string') return 'string';
+  return 'object';
+}
+
+function convertSchemaToJsonSchema(schema: any): Record<string, unknown> {
+  if (!schema || typeof schema !== 'object') {
+    return { type: 'object', properties: {} };
+  }
+  const out: Record<string, unknown> = {
+    type: mapGeminiTypeToJsonSchema(schema.type),
+  };
+  if (typeof schema.description === 'string') {
+    out.description = schema.description;
+  }
+  if (Array.isArray(schema.enum)) {
+    out.enum = schema.enum;
+  }
+  if (schema.properties && typeof schema.properties === 'object') {
+    const props: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(schema.properties)) {
+      props[key] = convertSchemaToJsonSchema(val);
+    }
+    out.properties = props;
+  } else if (out.type === 'object') {
+    out.properties = {};
+  }
+  if (Array.isArray(schema.required) && schema.required.length > 0) {
+    out.required = schema.required;
+  }
+  if (schema.items) {
+    out.items = convertSchemaToJsonSchema(schema.items);
+  }
+  return out;
+}
+
+const AUTH_BILLING_COOLDOWN_MS = 10 * 60 * 1000;
+const providerCooldowns = new Map<CopilotProviderId, { keySig: string; untilMs: number }>();
+
+function sanitizeApiKey(raw?: string | null): string {
+  if (!raw) return '';
+  let v = raw.trim();
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1).trim();
+  }
+  if (/^bearer\s+/i.test(v)) {
+    v = v.replace(/^bearer\s+/i, '').trim();
+  }
+  return v;
+}
+
+function getProviderKeySignature(provider: CopilotProviderId): string {
+  const raw =
+    provider === 'nous'
+      ? sanitizeApiKey(process.env.NOUS_API_KEY)
+      : provider === 'anthropic'
+        ? sanitizeApiKey(process.env.ANTHROPIC_API_KEY)
+        : sanitizeApiKey(process.env.GEMINI_API_KEY || process.env.API_KEY);
+  if (!raw) return '';
+  return `${raw.length}:${raw.slice(0, 6)}:${raw.slice(-4)}`;
+}
+
+function isProviderInCooldown(provider: CopilotProviderId): boolean {
+  const entry = providerCooldowns.get(provider);
+  if (!entry) return false;
+  const currentSig = getProviderKeySignature(provider);
+  if (!currentSig || entry.keySig !== currentSig || Date.now() >= entry.untilMs) {
+    providerCooldowns.delete(provider);
+    return false;
+  }
+  return true;
+}
+
+function isAuthOrBillingFailure(err: any): boolean {
+  const status = Number(err?.statusCode ?? err?.status ?? 0);
+  if (status === 401 || status === 402 || status === 403) return true;
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    msg.includes('invalid') ||
+    msg.includes('blocked') ||
+    msg.includes('out of funds') ||
+    msg.includes('credit balance') ||
+    msg.includes('insufficient') ||
+    msg.includes('authentication') ||
+    msg.includes('permission_denied')
+  );
+}
+
+function safeModelName(raw: string | undefined, fallback: string): string {
+  const v = (raw || '').trim();
+  if (!v || /^(sk-|key-|bearer\s)/i.test(v)) {
+    return fallback;
+  }
+  return v;
+}
+
+export function getActiveCopilotConfig(): {
+  providers: CopilotProviderId[];
+  primaryProvider: CopilotProviderId | null;
+  primaryModel: string;
+} {
+  const hasNous = Boolean(sanitizeApiKey(process.env.NOUS_API_KEY));
+  const hasAnthropic = Boolean(sanitizeApiKey(process.env.ANTHROPIC_API_KEY));
+  const hasGemini = Boolean(sanitizeApiKey(process.env.GEMINI_API_KEY || process.env.API_KEY));
+
+  const preferred = (process.env.COPILOT_PROVIDER || 'auto').trim().toLowerCase();
+  const configured: CopilotProviderId[] = [];
+  const pushIfAvailable = (p: CopilotProviderId) => {
+    if (configured.includes(p)) return;
+    if (p === 'anthropic' && hasAnthropic) configured.push('anthropic');
+    if (p === 'nous' && hasNous) configured.push('nous');
+    if (p === 'gemini' && hasGemini) configured.push('gemini');
+  };
+
+  if (preferred === 'nous' || preferred === 'anthropic' || preferred === 'gemini') {
+    pushIfAvailable(preferred);
+  }
+  pushIfAvailable('nous');
+  pushIfAvailable('anthropic');
+  pushIfAvailable('gemini');
+
+  // Move any provider whose current key recently failed auth/billing to the end (or skip if healthy ones exist)
+  const healthy = configured.filter((p) => !isProviderInCooldown(p));
+  const ordered = healthy.length > 0 ? healthy : configured;
+
+  const primaryProvider = ordered[0] ?? null;
+  const primaryModel =
+    primaryProvider === 'nous'
+      ? safeModelName(process.env.NOUS_MODEL, DEFAULT_NOUS_MODEL)
+      : primaryProvider === 'anthropic'
+        ? safeModelName(process.env.ANTHROPIC_MODEL, DEFAULT_ANTHROPIC_MODEL)
+        : COPILOT_FLASH_MODEL;
+
+  return { providers: ordered, primaryProvider, primaryModel };
+}
+
+function normalizeHistoryForOpenAI(contents: Content[], systemPrompt: string): Array<Record<string, unknown>> {
+  const messages: Array<Record<string, unknown>> = [{ role: 'system', content: systemPrompt }];
+  let synthIdCounter = 1;
+  const pendingCallIdsByName = new Map<string, string[]>();
+
+  for (const turn of contents) {
+    const role = turn?.role === 'model' ? 'assistant' : 'user';
+    const parts = Array.isArray(turn?.parts) ? (turn.parts as Array<Record<string, any>>) : [];
+
+    const textParts: string[] = [];
+    const toolCalls: Array<Record<string, unknown>> = [];
+    const toolResults: Array<{ id: string; name: string; content: string }> = [];
+
+    for (const part of parts) {
+      if (typeof part?.text === 'string' && part.text.trim()) {
+        textParts.push(part.text);
+      } else if (part?.functionCall && typeof part.functionCall === 'object') {
+        const name = String(part.functionCall.name || '');
+        const id = String(part.functionCall.id || `call_${synthIdCounter++}`);
+        const args = part.functionCall.args && typeof part.functionCall.args === 'object' ? part.functionCall.args : {};
+        toolCalls.push({
+          id,
+          type: 'function',
+          function: {
+            name,
+            arguments: JSON.stringify(args),
+          },
+        });
+        const queue = pendingCallIdsByName.get(name) || [];
+        queue.push(id);
+        pendingCallIdsByName.set(name, queue);
+      } else if (part?.functionResponse && typeof part.functionResponse === 'object') {
+        const name = String(part.functionResponse.name || '');
+        const queue = pendingCallIdsByName.get(name);
+        const id = String(
+          part.functionResponse.id ||
+            (queue && queue.length > 0 ? queue.shift() : `call_${synthIdCounter++}`)
+        );
+        const resp = part.functionResponse.response ?? {};
+        toolResults.push({
+          id,
+          name,
+          content: typeof resp === 'string' ? resp : JSON.stringify(resp),
+        });
+      }
+    }
+
+    if (role === 'assistant') {
+      if (toolCalls.length > 0 || textParts.length > 0) {
+        const msg: Record<string, unknown> = {
+          role: 'assistant',
+          content: textParts.length > 0 ? textParts.join('\n') : null,
+        };
+        if (toolCalls.length > 0) {
+          msg.tool_calls = toolCalls;
+        }
+        messages.push(msg);
+      }
+    } else {
+      for (const tr of toolResults) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tr.id,
+          name: tr.name,
+          content: tr.content,
+        });
+      }
+      if (textParts.length > 0) {
+        messages.push({
+          role: 'user',
+          content: textParts.join('\n'),
+        });
+      }
+    }
+  }
+
+  return messages;
+}
+
+async function runNousTurn(
+  contents: Content[],
+  context?: Record<string, unknown> | null
+): Promise<CopilotTurnResult> {
+  const apiKey = sanitizeApiKey(process.env.NOUS_API_KEY);
+  if (!apiKey) {
+    const err = new Error('NOUS_API_KEY is not configured.');
+    (err as any).statusCode = 503;
+    throw err;
+  }
+
+  const baseUrl = (process.env.NOUS_BASE_URL?.trim() || DEFAULT_NOUS_BASE_URL).replace(/\/+$/, '');
+  const model = safeModelName(process.env.NOUS_MODEL, DEFAULT_NOUS_MODEL);
+  const systemPrompt = buildSystemInstructionWithContext(context);
+  const messages = normalizeHistoryForOpenAI(contents, systemPrompt);
+  const tools = COPILOT_TOOL_DECLARATIONS.map((decl) => ({
+    type: 'function',
+    function: {
+      name: decl.name,
+      description: decl.description || '',
+      parameters: convertSchemaToJsonSchema(decl.parameters),
+    },
+  }));
+
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      tools,
+      tool_choice: 'auto',
+    }),
+  });
+
+  const rawText = await res.text();
+  let data: any = null;
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const errMsg = data?.error?.message || data?.message || rawText || `Nous API HTTP ${res.status}`;
+    const err = new Error(`Nous Portal (${model}): ${errMsg}`);
+    (err as any).statusCode = res.status;
+    (err as any).provider = 'nous';
+    throw err;
+  }
+
+  const msg = data?.choices?.[0]?.message || {};
+  const text = typeof msg.content === 'string' ? msg.content.trim() : '';
+  const rawToolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+
+  const functionCalls: CopilotTurnResult['functionCalls'] = [];
+  const modelParts: Array<Record<string, unknown>> = [];
+  if (text) {
+    modelParts.push({ text });
+  }
+
+  for (let i = 0; i < rawToolCalls.length; i++) {
+    const tc = rawToolCalls[i];
+    const name = tc?.function?.name;
+    if (!name) continue;
+    const id = String(tc.id || `nous_call_${Date.now()}_${i}`);
+    let args: Record<string, unknown> = {};
+    if (typeof tc.function.arguments === 'string' && tc.function.arguments.trim()) {
+      try {
+        const parsed = JSON.parse(tc.function.arguments);
+        if (parsed && typeof parsed === 'object') args = parsed;
+      } catch {
+        args = {};
+      }
+    } else if (tc.function.arguments && typeof tc.function.arguments === 'object') {
+      args = tc.function.arguments;
+    }
+    functionCalls.push({ id, name, args });
+    modelParts.push({ functionCall: { id, name, args } });
+  }
+
+  return {
+    text,
+    functionCalls,
+    modelContent: modelParts.length > 0 ? ({ role: 'model', parts: modelParts } as Content) : null,
+    model,
+    provider: 'nous',
+  };
+}
+
+function normalizeHistoryForAnthropic(contents: Content[]): Array<Record<string, unknown>> {
+  const messages: Array<Record<string, unknown>> = [];
+  let synthIdCounter = 1;
+  const pendingCallIdsByName = new Map<string, string[]>();
+
+  for (const turn of contents) {
+    const role = turn?.role === 'model' ? 'assistant' : 'user';
+    const parts = Array.isArray(turn?.parts) ? (turn.parts as Array<Record<string, any>>) : [];
+    const blocks: Array<Record<string, unknown>> = [];
+
+    for (const part of parts) {
+      if (typeof part?.text === 'string' && part.text.trim()) {
+        blocks.push({ type: 'text', text: part.text });
+      } else if (part?.functionCall && typeof part.functionCall === 'object') {
+        const name = String(part.functionCall.name || '');
+        const id = String(part.functionCall.id || `toolu_${synthIdCounter++}`);
+        const input =
+          part.functionCall.args && typeof part.functionCall.args === 'object' ? part.functionCall.args : {};
+        blocks.push({ type: 'tool_use', id, name, input });
+        const queue = pendingCallIdsByName.get(name) || [];
+        queue.push(id);
+        pendingCallIdsByName.set(name, queue);
+      } else if (part?.functionResponse && typeof part.functionResponse === 'object') {
+        const name = String(part.functionResponse.name || '');
+        const queue = pendingCallIdsByName.get(name);
+        const toolUseId = String(
+          part.functionResponse.id ||
+            (queue && queue.length > 0 ? queue.shift() : `toolu_${synthIdCounter++}`)
+        );
+        const resp = part.functionResponse.response ?? {};
+        blocks.push({
+          type: 'tool_result',
+          tool_use_id: toolUseId,
+          content: typeof resp === 'string' ? resp : JSON.stringify(resp),
+        });
+      }
+    }
+
+    if (blocks.length === 0) continue;
+
+    // Merge consecutive messages of the same role as required by Anthropic API
+    const prev = messages[messages.length - 1];
+    if (prev && prev.role === role && Array.isArray(prev.content)) {
+      (prev.content as Array<Record<string, unknown>>).push(...blocks);
+    } else {
+      messages.push({ role, content: blocks });
+    }
+  }
+
+  return messages;
+}
+
+async function runAnthropicTurn(
+  contents: Content[],
+  context?: Record<string, unknown> | null
+): Promise<CopilotTurnResult> {
+  const apiKey = sanitizeApiKey(process.env.ANTHROPIC_API_KEY);
+  if (!apiKey) {
+    const err = new Error('ANTHROPIC_API_KEY is not configured.');
+    (err as any).statusCode = 503;
+    throw err;
+  }
+
+  const model = safeModelName(process.env.ANTHROPIC_MODEL, DEFAULT_ANTHROPIC_MODEL);
+  const systemPrompt = buildSystemInstructionWithContext(context);
+  const messages = normalizeHistoryForAnthropic(contents);
+  const tools = COPILOT_TOOL_DECLARATIONS.map((decl) => ({
+    name: decl.name,
+    description: decl.description || '',
+    input_schema: convertSchemaToJsonSchema(decl.parameters),
+  }));
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages,
+      tools,
+    }),
+  });
+
+  const rawText = await res.text();
+  let data: any = null;
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const errMsg = data?.error?.message || data?.message || rawText || `Anthropic API HTTP ${res.status}`;
+    const err = new Error(`Anthropic (${model}): ${errMsg}`);
+    (err as any).statusCode = res.status;
+    (err as any).provider = 'anthropic';
+    throw err;
+  }
+
+  const contentBlocks = Array.isArray(data?.content) ? data.content : [];
+  const textParts: string[] = [];
+  const functionCalls: CopilotTurnResult['functionCalls'] = [];
+  const modelParts: Array<Record<string, unknown>> = [];
+
+  for (const block of contentBlocks) {
+    if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+      textParts.push(block.text.trim());
+      modelParts.push({ text: block.text.trim() });
+    } else if (block?.type === 'tool_use' && block.name) {
+      const id = String(block.id || `toolu_${Date.now()}`);
+      const args = block.input && typeof block.input === 'object' ? block.input : {};
+      functionCalls.push({ id, name: String(block.name), args });
+      modelParts.push({ functionCall: { id, name: String(block.name), args } });
+    }
+  }
+
+  return {
+    text: textParts.join('\n').trim(),
+    functionCalls,
+    modelContent: modelParts.length > 0 ? ({ role: 'model', parts: modelParts } as Content) : null,
+    model,
+    provider: 'anthropic',
+  };
+}
+
+async function runGeminiTurn(
   contents: Content[],
   context?: Record<string, unknown> | null
 ): Promise<CopilotTurnResult> {
   const client = getGeminiClient();
   if (!client) {
     const err = new Error(
-      'GEMINI_API_KEY is not configured on the server. Add it in Settings > Secrets to use Co-Pilot.'
+      'No Co-Pilot API key is configured. Add NOUS_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY in Settings > Secrets.'
     );
     (err as any).statusCode = 503;
     throw err;
   }
 
+  const modelsToTry = [COPILOT_FLASH_MODEL, GEMINI_FALLBACK_FLASH_MODEL];
+  let lastErr: any = null;
+
+  for (const modelName of modelsToTry) {
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const config: Record<string, unknown> = {
+          systemInstruction: buildSystemInstructionWithContext(context),
+          tools: [{ functionDeclarations: COPILOT_TOOL_DECLARATIONS }],
+        };
+        if (modelName === COPILOT_FLASH_MODEL) {
+          config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+        const response = await client.models.generateContent({
+          model: modelName,
+          contents,
+          config,
+        });
+
+        const modelContent = response.candidates?.[0]?.content ?? null;
+        const rawCalls = response.functionCalls ?? [];
+        const functionCalls = rawCalls
+          .filter((fc): fc is NonNullable<typeof fc> & { name: string } => Boolean(fc?.name))
+          .map((fc) => ({
+            id: fc.id,
+            name: fc.name,
+            args: (fc.args && typeof fc.args === 'object' ? fc.args : {}) as Record<string, unknown>,
+          }));
+
+        return {
+          text: (response.text ?? '').trim(),
+          functionCalls,
+          modelContent,
+          model: modelName,
+          provider: 'gemini',
+        };
+      } catch (err: any) {
+        lastErr = err;
+        (lastErr as any).provider = 'gemini';
+        const msg = String(err?.message || '');
+        const status = err?.status ?? err?.statusCode ?? 0;
+        const isTransient =
+          status === 503 ||
+          msg.includes('503') ||
+          msg.includes('UNAVAILABLE') ||
+          msg.includes('overloaded');
+        const isQuota = status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
+
+        if (isTransient && attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
+          continue;
+        }
+        if (isQuota && modelName !== GEMINI_FALLBACK_FLASH_MODEL) {
+          // Try higher-quota Flash fallback before surfacing 429
+          break;
+        }
+        throw err;
+      }
+    }
+  }
+
+  throw lastErr || new Error('Gemini Co-Pilot returned no response.');
+}
+
+export async function runCopilotTurn(
+  contents: Content[],
+  context?: Record<string, unknown> | null
+): Promise<CopilotTurnResult> {
   if (!Array.isArray(contents) || contents.length === 0) {
     const err = new Error('Conversation contents array is required.');
     (err as any).statusCode = 400;
     throw err;
   }
 
-  const maxAttempts = 3;
-  let lastErr: any = null;
-  let response: any = null;
+  const { providers } = getActiveCopilotConfig();
+  if (providers.length === 0) {
+    const err = new Error(
+      'No Co-Pilot API key configured on the server. Add NOUS_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY in Settings > Secrets.'
+    );
+    (err as any).statusCode = 503;
+    throw err;
+  }
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  let lastErr: any = null;
+  for (const provider of providers) {
     try {
-      response = await client.models.generateContent({
-        model: COPILOT_FLASH_MODEL,
-        contents,
-        config: {
-          systemInstruction: buildSystemInstructionWithContext(context),
-          tools: [{ functionDeclarations: COPILOT_TOOL_DECLARATIONS }],
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        },
-      });
-      break;
+      let result: CopilotTurnResult;
+      if (provider === 'anthropic') result = await runAnthropicTurn(contents, context);
+      else if (provider === 'nous') result = await runNousTurn(contents, context);
+      else result = await runGeminiTurn(contents, context);
+      providerCooldowns.delete(provider);
+      return result;
     } catch (err: any) {
       lastErr = err;
-      const msg = String(err?.message || '');
-      const status = err?.status ?? err?.statusCode ?? 0;
-      const isTransient =
-        status === 503 ||
-        msg.includes('503') ||
-        msg.includes('UNAVAILABLE') ||
-        msg.includes('overloaded');
-      if (isTransient && attempt < maxAttempts) {
-        const delayMs = 600 * Math.pow(2, attempt - 1);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        continue;
+      if (isAuthOrBillingFailure(err)) {
+        providerCooldowns.set(provider, {
+          keySig: getProviderKeySignature(provider),
+          untilMs: Date.now() + AUTH_BILLING_COOLDOWN_MS,
+        });
       }
-      throw err;
     }
   }
 
-  if (!response) {
-    throw lastErr || new Error('Co-Pilot model returned no response.');
-  }
-
-  const modelContent = response.candidates?.[0]?.content ?? null;
-  const rawCalls = response.functionCalls ?? [];
-  const functionCalls = rawCalls
-    .filter((fc): fc is NonNullable<typeof fc> & { name: string } => Boolean(fc?.name))
-    .map((fc) => ({
-      id: fc.id,
-      name: fc.name,
-      args: (fc.args && typeof fc.args === 'object' ? fc.args : {}) as Record<string, unknown>,
-    }));
-
-  return {
-    text: (response.text ?? '').trim(),
-    functionCalls,
-    modelContent,
-    model: COPILOT_FLASH_MODEL,
-  };
+  throw lastErr || new Error('Co-Pilot request failed.');
 }

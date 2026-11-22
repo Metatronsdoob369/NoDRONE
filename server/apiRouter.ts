@@ -17,6 +17,7 @@ import {
 import {
   COPILOT_FLASH_MODEL,
   COPILOT_LIVE_MODEL,
+  getActiveCopilotConfig,
   runCopilotTurn,
 } from './copilotService.js';
 
@@ -429,10 +430,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       }
       if (status === 429 || rawMessage.includes('RESOURCE_EXHAUSTED') || rawMessage.includes('429')) {
         cleanMessage =
-          'Rate limit reached on the current API key. Wait a few seconds and retry, or select a billing-enabled key in Settings > Secrets.';
-      } else if (status === 403 || rawMessage.includes('PERMISSION_DENIED') || rawMessage.includes('API_KEY_INVALID')) {
+          'Rate limit reached on the active Co-Pilot API key. Wait a few seconds and retry, or add NOUS_API_KEY / ANTHROPIC_API_KEY in Settings > Secrets.';
+      } else if (status === 401 || status === 403 || rawMessage.includes('PERMISSION_DENIED') || rawMessage.includes('API_KEY_INVALID')) {
+        const providerLabel = err?.provider ? `${String(err.provider).toUpperCase()} ` : '';
         cleanMessage =
-          'Gemini API key is invalid or missing permissions. Check your key in Settings > Secrets.';
+          `${providerLabel}API key is invalid or missing permissions. Check your key in Settings > Secrets.`;
       }
       console.error('API /api/copilot/turn error:', cleanMessage);
       sendJson(res, status >= 400 && status < 600 ? status : 500, { error: cleanMessage });
@@ -442,15 +444,17 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
   // 11. Health / Status Endpoint
   if (url.startsWith('/api/ai/status') && req.method === 'GET') {
-    const hasKey = Boolean(process.env.GEMINI_API_KEY || process.env.API_KEY);
+    const cfg = getActiveCopilotConfig();
     sendJson(res, 200, {
       status: 'online',
-      model: COPILOT_FLASH_MODEL,
+      provider: cfg.primaryProvider,
+      configuredProviders: cfg.providers,
+      model: cfg.primaryModel,
       copilotFlashModel: COPILOT_FLASH_MODEL,
       copilotLiveModel: COPILOT_LIVE_MODEL,
-      hasApiKey: hasKey,
+      hasApiKey: cfg.providers.length > 0,
       hasWeatherKey: hasOpenWeatherMapKey(),
-      engine: `NoDRONE Co-Pilot (${COPILOT_FLASH_MODEL} / ${COPILOT_LIVE_MODEL})`,
+      engine: `NoDRONE Co-Pilot (${cfg.primaryProvider || 'unconfigured'}: ${cfg.primaryModel} / Live: ${COPILOT_LIVE_MODEL})`,
     });
     return true;
   }
