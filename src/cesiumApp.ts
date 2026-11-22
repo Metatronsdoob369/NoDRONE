@@ -381,8 +381,8 @@ let cameraPathRemove: (() => void) | null = null;
     document.querySelectorAll<HTMLButtonElement>('.panel-tab-btn').forEach((btn) => {
       const isSelected = btn.dataset.panelTab === tab;
       btn.className = isSelected
-        ? 'panel-tab-btn px-2 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap bg-zinc-800 text-zinc-100'
-        : 'panel-tab-btn px-2 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap text-zinc-400 hover:text-zinc-200';
+        ? 'panel-tab-btn glass-btn px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap bg-white/[0.14] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]'
+        : 'panel-tab-btn glass-btn px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap text-zinc-300/80 hover:text-white';
     });
   }
 
@@ -1347,6 +1347,7 @@ let cameraPathRemove: (() => void) | null = null;
       flightHudBanner,
       recIndicator,
       document.querySelector('nav') as HTMLElement | null,
+      el<HTMLElement>('btn-recall-hud'),
     ].filter((node): node is HTMLElement => Boolean(node));
 
     const savedHudDisplays = hudElements.map((node) => ({
@@ -3673,6 +3674,12 @@ let cameraPathRemove: (() => void) | null = null;
         return;
       }
 
+      if ((e.key === 'h' || e.key === 'H') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setHudTucked(!hudTucked);
+        return;
+      }
+
       if (flightMode === 'wasd') {
         if (
           [
@@ -3707,39 +3714,93 @@ let cameraPathRemove: (() => void) | null = null;
     });
   }
 
+  let hudTucked = false;
+  let tuckedSnapshot = {
+    weather: weatherVisible,
+    health: healthVisible,
+    panel: false,
+    copilot: false,
+  };
+
   function setControlPanelVisible(visible: boolean): void {
     panelVisible = visible;
     if (controlPanel) {
-      controlPanel.classList.toggle('hidden', !visible);
-      controlPanel.classList.toggle('flex', visible);
-      controlPanel.style.display = visible ? 'flex' : 'none';
+      controlPanel.setAttribute('data-tucked', visible ? 'false' : 'true');
       controlPanel.setAttribute('aria-hidden', String(!visible));
     }
     const toggleBtn = el<HTMLButtonElement>('btn-toggle-panel');
     if (toggleBtn) {
       toggleBtn.className = visible
-        ? 'px-2.5 sm:px-3 py-2 rounded-xl text-xs font-semibold bg-zinc-700 text-white hover:bg-zinc-600 transition-colors cursor-pointer whitespace-nowrap shrink-0'
-        : 'px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors cursor-pointer whitespace-nowrap shrink-0';
+        ? 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.15] text-white border border-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] cursor-pointer whitespace-nowrap shrink-0'
+        : 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-300/90 hover:text-white hover:bg-white/[0.08] border border-transparent cursor-pointer whitespace-nowrap shrink-0';
     }
   }
 
   function setHealthPanelVisible(visible: boolean): void {
     healthVisible = visible;
     if (healthPanel) {
-      healthPanel.classList.remove('sm:flex');
-      healthPanel.classList.toggle('hidden', !visible);
-      healthPanel.classList.toggle('flex', visible);
+      healthPanel.setAttribute('data-tucked', visible ? 'false' : 'true');
       healthPanel.setAttribute('aria-hidden', String(!visible));
+    }
+    const toggleBtn = el<HTMLButtonElement>('btn-toggle-health');
+    if (toggleBtn) {
+      toggleBtn.className = visible
+        ? 'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/20 text-emerald-200 border border-emerald-400/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] cursor-pointer whitespace-nowrap shrink-0'
+        : 'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-300/90 hover:text-white hover:bg-white/[0.08] border border-transparent cursor-pointer whitespace-nowrap shrink-0';
     }
   }
 
   function setWeatherHudVisible(visible: boolean): void {
     weatherVisible = visible;
     if (weatherHud) {
-      weatherHud.classList.remove('sm:flex');
-      weatherHud.classList.toggle('hidden', !visible);
-      weatherHud.classList.toggle('flex', visible);
+      weatherHud.setAttribute('data-tucked', visible ? 'false' : 'true');
       weatherHud.setAttribute('aria-hidden', String(!visible));
+    }
+    const toggleBtn = el<HTMLButtonElement>('btn-toggle-weather');
+    if (toggleBtn) {
+      toggleBtn.className = visible
+        ? 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-sky-500/20 text-sky-200 border border-sky-400/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] cursor-pointer whitespace-nowrap shrink-0'
+        : 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-300/90 hover:text-white hover:bg-white/[0.08] border border-transparent cursor-pointer whitespace-nowrap shrink-0';
+    }
+  }
+
+  function setHudTucked(tucked: boolean): void {
+    if (hudTucked === tucked) return;
+    hudTucked = tucked;
+
+    const headerEl = document.querySelector('header') as HTMLElement | null;
+    const dockEl = el<HTMLElement>('hud-dock');
+    const recallBtn = el<HTMLButtonElement>('btn-recall-hud');
+
+    if (tucked) {
+      tuckedSnapshot = {
+        weather: weatherVisible,
+        health: healthVisible,
+        panel: panelVisible,
+        copilot: controller.isCopilotDrawerVisible?.() ?? false,
+      };
+      setWeatherHudVisible(false);
+      setHealthPanelVisible(false);
+      setControlPanelVisible(false);
+      controller.setCopilotDrawerVisible?.(false);
+
+      headerEl?.setAttribute('data-tucked', 'true');
+      dockEl?.setAttribute('data-tucked', 'true');
+      recallBtn?.setAttribute('data-tucked', 'false');
+      recallBtn?.setAttribute('aria-hidden', 'false');
+    } else {
+      recallBtn?.setAttribute('data-tucked', 'true');
+      recallBtn?.setAttribute('aria-hidden', 'true');
+      headerEl?.setAttribute('data-tucked', 'false');
+      dockEl?.setAttribute('data-tucked', 'false');
+
+      if (tuckedSnapshot.weather) setWeatherHudVisible(true);
+      if (tuckedSnapshot.health) setHealthPanelVisible(true);
+      if (tuckedSnapshot.copilot) {
+        controller.setCopilotDrawerVisible?.(true);
+      } else if (tuckedSnapshot.panel) {
+        setControlPanelVisible(true);
+      }
     }
   }
 
@@ -4114,6 +4175,16 @@ let cameraPathRemove: (() => void) | null = null;
     e.stopPropagation();
     setControlPanelVisible(false);
     controller.onControlPanelToggle?.(false);
+  });
+  el<HTMLButtonElement>('btn-tuck-hud')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setHudTucked(true);
+  });
+  el<HTMLButtonElement>('btn-recall-hud')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setHudTucked(false);
   });
 
   setControlPanelVisible(false);

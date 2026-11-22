@@ -19,6 +19,141 @@
   }
 }
 
+/* ==========================================================================
+   Optical Glassmorphic Surfaces & Tactile Tuck-Away Motion System
+   ========================================================================== */
+
+:root {
+  --ease-out-expo: cubic-bezier(0.22, 1, 0.36, 1);
+  --tuck-enter-ms: 240ms;
+  --tuck-exit-ms: 180ms;
+}
+
+.glass-panel {
+  background: linear-gradient(
+    180deg,
+    rgba(19, 22, 30, 0.56) 0%,
+    rgba(10, 12, 18, 0.68) 100%
+  );
+  backdrop-filter: blur(26px) saturate(185%);
+  -webkit-backdrop-filter: blur(26px) saturate(185%);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow:
+    0 24px 56px -16px rgba(0, 0, 0, 0.65),
+    0 2px 10px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.04);
+}
+
+.glass-bar {
+  background: linear-gradient(
+    180deg,
+    rgba(22, 25, 33, 0.54) 0%,
+    rgba(11, 13, 19, 0.68) 100%
+  );
+  backdrop-filter: blur(22px) saturate(190%);
+  -webkit-backdrop-filter: blur(22px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 16px 40px -12px rgba(0, 0, 0, 0.62),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.17);
+}
+
+.glass-well {
+  background: rgba(255, 255, 255, 0.038);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.045);
+}
+
+.glass-input {
+  background: rgba(8, 10, 15, 0.44);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+
+.glass-input:focus {
+  background: rgba(8, 10, 15, 0.62);
+  border-color: rgba(129, 140, 248, 0.65);
+  box-shadow:
+    0 0 0 2px rgba(99, 102, 241, 0.2),
+    inset 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.glass-btn {
+  transition:
+    transform 150ms var(--ease-out-expo),
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.glass-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Compositor-only GPU Tuck-Away Transitions (interruptible, no layout reflow) */
+.tuck-panel {
+  will-change: transform, opacity;
+}
+
+.tuck-panel[data-tucked="false"] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate3d(0, 0, 0) scale(1);
+  transition:
+    transform var(--tuck-enter-ms) var(--ease-out-expo),
+    opacity 200ms ease-out,
+    visibility 0ms linear 0ms;
+}
+
+.tuck-panel.tuck-passthrough[data-tucked="false"] {
+  pointer-events: none;
+}
+
+.tuck-panel[data-tucked="true"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    transform var(--tuck-exit-ms) var(--ease-out-expo),
+    opacity 150ms ease-out,
+    visibility 0ms linear var(--tuck-exit-ms);
+}
+
+.tuck-left[data-tucked="true"] {
+  transform: translate3d(calc(-100% - 1.5rem), 0, 0) scale(0.97);
+}
+
+.tuck-right[data-tucked="true"] {
+  transform: translate3d(calc(100% + 1.5rem), 0, 0) scale(0.97);
+}
+
+.tuck-top[data-tucked="true"] {
+  transform: translate3d(0, calc(-100% - 1.5rem), 0) scale(0.97);
+}
+
+.tuck-bottom[data-tucked="true"] {
+  transform: translate3d(0, calc(100% + 1.5rem), 0) scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tuck-panel,
+  .tuck-panel[data-tucked="false"],
+  .tuck-panel[data-tucked="true"],
+  .glass-btn {
+    transition-duration: 0.01ms !important;
+  }
+  .tuck-left[data-tucked="true"],
+  .tuck-right[data-tucked="true"],
+  .tuck-top[data-tucked="true"],
+  .tuck-bottom[data-tucked="true"] {
+    transform: none !important;
+  }
+}
+
 /* Minimal Cesium Credit & Widget Overrides */
 .cesium-viewer-bottom {
   left: 1rem !important;
@@ -31,7 +166,7 @@
   max-height: 18px !important;
 }
 
-/* Subtle Dark Scrollbars for Mission Control & Telemetry Logs */
+/* Ultra-Thin Translucent Scrollbars for Glass Panels */
 ::-webkit-scrollbar {
   width: 5px;
   height: 5px;
@@ -42,10 +177,10 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(113, 113, 122, 0.35);
+  background: rgba(255, 255, 255, 0.16);
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(161, 161, 170, 0.55);
+  background: rgba(255, 255, 255, 0.3);
 }

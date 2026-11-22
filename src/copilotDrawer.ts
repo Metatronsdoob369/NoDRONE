@@ -179,21 +179,14 @@ export function initCopilotDrawer(controller: NoDroneController): void {
   function setDrawerVisible(visible: boolean): void {
     drawerVisible = visible;
     if (drawer) {
-      drawer.classList.toggle('hidden', !visible);
-      drawer.classList.toggle('flex', visible);
-      drawer.style.display = visible ? 'flex' : 'none';
+      drawer.setAttribute('data-tucked', visible ? 'false' : 'true');
       drawer.setAttribute('aria-hidden', String(!visible));
     }
     if (visible) {
       controller.hideControlPanel();
-      const cp = document.getElementById('control-panel');
-      if (cp) {
-        cp.classList.add('hidden');
-        cp.classList.remove('flex');
-        cp.style.display = 'none';
-        cp.setAttribute('aria-hidden', 'true');
-      }
-      inputEl?.focus();
+      window.setTimeout(() => {
+        if (drawerVisible) inputEl?.focus();
+      }, 60);
     }
     updateDockButtonStyle();
   }
@@ -202,15 +195,18 @@ export function initCopilotDrawer(controller: NoDroneController): void {
     if (!toggleBtn) return;
     if (drawerVisible) {
       toggleBtn.className =
-        'flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white border border-indigo-500 hover:bg-indigo-500 transition-colors cursor-pointer whitespace-nowrap shrink-0';
+        'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/30 text-white border border-indigo-400/45 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] cursor-pointer whitespace-nowrap shrink-0';
     } else {
       toggleBtn.className =
-        'flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium bg-indigo-600/20 text-indigo-200 border border-indigo-500/35 hover:bg-indigo-600/35 transition-colors cursor-pointer whitespace-nowrap shrink-0';
+        'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium bg-indigo-500/12 text-indigo-200 border border-indigo-400/20 hover:bg-indigo-500/24 hover:text-white cursor-pointer whitespace-nowrap shrink-0';
     }
   }
 
-  // Enforce clean closed state on initial load
+  // Enforce clean tucked state on initial load
   setDrawerVisible(false);
+
+  controller.isCopilotDrawerVisible = () => drawerVisible;
+  controller.setCopilotDrawerVisible = (visible: boolean) => setDrawerVisible(visible);
 
   controller.onControlPanelToggle = (controlPanelOpen: boolean) => {
     if (controlPanelOpen && drawerVisible) {

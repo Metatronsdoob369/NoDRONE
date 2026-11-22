@@ -158,6 +158,8 @@ export interface NoDroneController {
   executeTool: (name: string, args: Record<string, unknown>) => Promise<CopilotToolResult>;
   hideControlPanel: () => void;
   onControlPanelToggle?: (visible: boolean) => void;
+  isCopilotDrawerVisible?: () => boolean;
+  setCopilotDrawerVisible?: (visible: boolean) => void;
 }
 
 
