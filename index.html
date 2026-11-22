@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NoDRONE — Cesium 3DGS SplatMap & Aerial Flight Viewer</title>
+  <meta name="description" content="CesiumJS 3DGS SplatMap Viewer, Virtual Drone Flight Engine, Aerial Video Recorder & Geospatial Site Manifest Workbench" />
+  <meta property="og:title" content="NoDRONE — Cesium 3DGS SplatMap & Aerial Flight Viewer" />
+  <meta property="og:description" content="CesiumJS 3DGS SplatMap Viewer, Virtual Drone Flight Engine, Aerial Video Recorder & Geospatial Site Manifest Workbench" />
+
+  <!-- Typography: Plus Jakarta Sans + JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- CesiumJS 1.147 (Native 3D Gaussian Splatting + SPZ + HLOD 3D Tiles 1.1) -->
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.147/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.147/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+</head>
+<body class="bg-zinc-950 text-zinc-100 font-sans antialiased overflow-hidden select-none h-screen w-screen relative">
+
+  <!-- Full-Viewport Cesium 3D Globe Container -->
+  <div id="cesium-container" class="absolute inset-0 w-full h-full bg-zinc-950"></div>
+
+  <!-- WebGL Context Fallback Banner -->
+  <div id="webgl-fallback" class="hidden absolute inset-0 z-30 flex items-center justify-center bg-zinc-950/90 p-6">
+    <div class="max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center space-y-3 shadow-2xl">
+      <h2 class="text-sm font-semibold text-zinc-100">3D WebGL Context Interrupted</h2>
+      <p class="text-xs text-zinc-400 leading-relaxed">The browser paused GPU rendering for the 3D globe. Reload or restore the viewport to continue exploring 3DGS tilesets.</p>
+      <button id="btn-reload-webgl" type="button" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition-colors cursor-pointer">Restore Viewport</button>
+    </div>
+  </div>
+
+  <!-- Hidden Site Manifest JSON File Input -->
+  <input type="file" id="input-manifest-file" accept=".json,application/json" class="hidden" />
+
+  <!-- Subtle Flight / Recording Reticle Overlay (only visible in WASD / Orbit / Recording) -->
+  <div id="flight-hud-banner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex items-center gap-3 bg-zinc-900/85 backdrop-blur-md border border-zinc-800/80 rounded-xl px-4 py-2 shadow-2xl">
+    <span id="flight-hud-label" class="text-xs font-medium text-zinc-200 whitespace-nowrap">WASD Pilot Active</span>
+    <span class="text-zinc-600" aria-hidden="true">·</span>
+    <span id="flight-hud-hint" class="text-[11px] font-mono text-zinc-400 whitespace-nowrap">W/A/S/D Move · Q/E Yaw · Space/Shift Alt</span>
+  </div>
+
+  <!-- Active Recording Status Banner -->
+  <div id="rec-indicator" class="hidden absolute top-16 sm:top-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-zinc-900/95 backdrop-blur-md border border-red-500/40 rounded-xl px-4 py-2 shadow-2xl">
+    <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
+    <span id="rec-mode-text" class="text-xs font-semibold text-red-200 whitespace-nowrap">Recording</span>
+    <span id="rec-timer" class="text-xs font-mono text-zinc-100 tabular-nums">00:00</span>
+    <button id="btn-stop-rec-banner" type="button" class="ml-1 px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-[11px] font-semibold text-white transition-colors cursor-pointer whitespace-nowrap">Stop</button>
+  </div>
+
+  <!-- Top-Left Floating Brand & Connection Bar -->
+  <header class="absolute top-4 left-4 right-4 sm:right-auto z-20 flex items-center pointer-events-none">
+    <div class="pointer-events-auto flex items-center gap-3 bg-zinc-900/85 backdrop-blur-md border border-zinc-800/80 rounded-2xl px-4 py-2.5 shadow-2xl">
+      <div class="flex items-center justify-center w-8 h-8 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 shrink-0">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+        </svg>
+      </div>
+      <div class="min-w-0">
+        <h1 class="text-sm font-bold tracking-tight text-zinc-100 leading-tight whitespace-nowrap">NoDRONE</h1>
+        <div class="flex items-center gap-1.5 mt-0.5 text-[11px] text-zinc-400">
+          <span id="ion-status-dot" class="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"></span>
+          <span id="ion-status-text" class="truncate max-w-[165px]">Satellite Globe</span>
+        </div>
+      </div>
+      <div class="h-6 w-px bg-zinc-800 mx-0.5 shrink-0"></div>
+      <button id="btn-open-token" type="button" class="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-medium px-3 py-2 rounded-xl transition-all shadow-lg shadow-indigo-500/20 shrink-0 cursor-pointer whitespace-nowrap">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+        </svg>
+        <span>ion Token</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Floating Real-Time Site Weather HUD -->
+  <section id="weather-hud" class="hidden sm:flex absolute top-20 left-4 z-20 w-[calc(100vw-2rem)] sm:w-80 bg-zinc-900/88 backdrop-blur-md border border-zinc-800/80 rounded-2xl p-3.5 shadow-2xl flex-col gap-2.5 transition-all duration-150">
+    <div class="flex items-center justify-between gap-2 border-b border-zinc-800 pb-2">
+      <div class="min-w-0">
+        <div class="flex items-center gap-1.5">
+          <h2 id="weather-station" class="text-xs font-semibold text-zinc-100 truncate">Site Weather</h2>
+          <span class="text-zinc-600" aria-hidden="true">·</span>
+          <span id="weather-source" class="text-[10px] font-mono text-zinc-400 shrink-0">Live</span>
+        </div>
+        <p id="weather-condition" class="text-[11px] text-zinc-400 capitalize truncate">Fetching site telemetry...</p>
+      </div>
+      <div class="flex items-center gap-1 shrink-0">
+        <button id="btn-weather-units" type="button" class="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[10px] font-mono font-medium text-zinc-200 transition-colors cursor-pointer" title="Switch °F/mph or °C/m/s">°F</button>
+        <button id="btn-weather-refresh" type="button" class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" title="Refresh Site Weather">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+          </svg>
+        </button>
+        <button id="btn-close-weather" type="button" class="p-1 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" title="Hide Weather HUD">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Primary Conditions Grid: Temperature, Wind Speed, Cloud Cover -->
+    <div class="grid grid-cols-3 gap-1.5">
+      <div class="bg-zinc-950/75 border border-zinc-800/70 rounded-xl p-2">
+        <div class="text-[10px] text-zinc-500">Temp</div>
+        <div id="weather-temp" class="text-sm font-mono font-semibold text-zinc-100 tabular-nums mt-0.5">--</div>
+        <div id="weather-feels" class="text-[10px] font-mono text-zinc-500 tabular-nums">Feels --</div>
+      </div>
+      <div class="bg-zinc-950/75 border border-zinc-800/70 rounded-xl p-2">
+        <div class="text-[10px] text-zinc-500">Wind</div>
+        <div id="weather-wind" class="text-sm font-mono font-semibold text-zinc-100 tabular-nums mt-0.5">--</div>
+        <div class="flex items-center gap-1 text-[10px] font-mono text-zinc-400 tabular-nums">
+          <svg id="weather-wind-arrow" class="w-2.5 h-2.5 text-sky-400 shrink-0 transition-transform duration-300" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2L19 21L12 17L5 21L12 2Z" />
+          </svg>
+          <span id="weather-wind-dir">--</span>
+        </div>
+      </div>
+      <div class="bg-zinc-950/75 border border-zinc-800/70 rounded-xl p-2">
+        <div class="text-[10px] text-zinc-500">Clouds</div>
+        <div id="weather-clouds" class="text-sm font-mono font-semibold text-zinc-100 tabular-nums mt-0.5">--</div>
+        <div class="mt-1 h-1 w-full rounded-full bg-zinc-800 overflow-hidden">
+          <div id="weather-clouds-bar" class="h-full bg-sky-400 transition-all duration-300" style="width: 0%"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Flight Advisory & Atmospheric Strip -->
+    <div class="flex items-center justify-between gap-2 bg-zinc-950/75 border border-zinc-800/70 rounded-xl px-2.5 py-1.5 text-[11px]">
+      <span id="weather-atmos" class="font-mono text-zinc-400 tabular-nums truncate">RH --% · -- hPa</span>
+      <span id="weather-advisory" class="font-medium text-emerald-300 whitespace-nowrap shrink-0">Favorable Flight</span>
+    </div>
+  </section>
+
+  <!-- Cesium ion Token Modal -->
+  <div id="token-modal" class="hidden absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/75 backdrop-blur-sm p-4">
+    <div class="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-2xl p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between">
+        <h2 class="text-sm font-semibold text-zinc-100">Connect Cesium ion</h2>
+        <button id="btn-close-token-modal" type="button" class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" aria-label="Close modal">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <p class="text-xs text-zinc-400 leading-relaxed">
+        Paste your <span class="text-zinc-200 font-medium">Cesium ion Access Token</span> to unlock Cesium World Terrain, Google Photorealistic 3D Tiles, the 110M-splat demo (<code class="font-mono text-indigo-300">4547222</code>), and your own tiled 3DGS assets.
+      </p>
+      <div class="space-y-1.5">
+        <label for="input-ion-token" class="text-[11px] font-medium text-zinc-400">Access Token (saved locally in this browser)</label>
+        <textarea id="input-ion-token" rows="3" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." class="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-xs font-mono text-zinc-200 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+      </div>
+      <div class="flex items-center justify-between gap-2 pt-1">
+        <button id="btn-clear-token" type="button" class="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-colors cursor-pointer">Clear Saved</button>
+        <div class="flex items-center gap-2">
+          <button id="btn-cancel-token" type="button" class="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-colors cursor-pointer">Cancel</button>
+          <button id="btn-apply-token" type="button" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition-colors shadow-lg shadow-indigo-500/20 cursor-pointer">Connect & Upgrade Globe</button>
+        </div>
+      </div>
+      <p class="text-[11px] text-zinc-500 border-t border-zinc-800 pt-2.5">
+        Tip: Tokens with <code class="font-mono text-zinc-300">assets:read</code> scope unlock World Terrain, Google 3D Tiles, and custom SplatMap assets.
+      </p>
+    </div>
+  </div>
+
+  <!-- Recorded Aerial Clip Playback Modal -->
+  <div id="clip-modal" class="hidden absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/80 backdrop-blur-sm p-4">
+    <div class="w-full max-w-2xl bg-zinc-900 border border-zinc-800 rounded-2xl p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 id="clip-modal-title" class="text-sm font-semibold text-zinc-100">Recorded Aerial Clip</h2>
+          <p id="clip-modal-meta" class="text-[11px] text-zinc-400 mt-0.5 tabular-nums">WebM Capture</p>
+        </div>
+        <button id="btn-close-clip-modal" type="button" class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" aria-label="Close video preview">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      <div class="rounded-xl overflow-hidden bg-black border border-zinc-800 aspect-video">
+        <video id="clip-modal-video" controls autoplay loop playsinline class="w-full h-full object-contain"></video>
+      </div>
+      <div class="flex items-center justify-end gap-2">
+        <button id="btn-close-clip-modal-footer" type="button" class="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-colors cursor-pointer">Close</button>
+        <a id="btn-download-clip-modal" href="#" download="nodrone-clip.webm" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition-colors shadow-lg shadow-indigo-500/20">Download WebM</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading Indicator Overlay -->
+  <div id="loading-overlay" class="hidden absolute inset-0 z-40 flex items-center justify-center bg-zinc-950/60 backdrop-blur-sm">
+    <div class="flex flex-col items-center gap-3 bg-zinc-900 border border-zinc-800 rounded-2xl px-6 py-5 shadow-2xl max-w-xs text-center">
+      <div class="w-8 h-8 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
+      <p id="loading-text" class="text-sm font-medium text-zinc-200">Streaming 3D Tileset...</p>
+    </div>
+  </div>
+
+  <!-- Right Collapsible Mission Control Panel (closed by default on load) -->
+  <aside id="control-panel" aria-hidden="true" class="hidden absolute top-20 sm:top-4 right-4 z-20 w-[calc(100vw-2rem)] sm:w-84 max-h-[calc(100vh-10rem)] sm:max-h-[calc(100vh-5.5rem)] overflow-y-auto bg-zinc-900/88 backdrop-blur-md border border-zinc-800/80 rounded-2xl p-4 shadow-2xl flex-col gap-4 transition-all duration-150">
+    <!-- Panel Header -->
+    <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
+      <h2 class="text-xs font-semibold tracking-wide text-zinc-300">Geospatial &amp; Flight Control</h2>
+      <button id="btn-close-panel" type="button" class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" title="Hide Panel">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Compact Segmented Panel Tabs -->
+    <div class="grid grid-cols-3 gap-1 p-1 rounded-xl bg-zinc-950/80 border border-zinc-800/80">
+      <button type="button" data-panel-tab="map" class="panel-tab-btn px-2 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap bg-zinc-800 text-zinc-100">3DGS &amp; Map</button>
+      <button type="button" data-panel-tab="flight" class="panel-tab-btn px-2 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap text-zinc-400 hover:text-zinc-200">Flight &amp; Rec</button>
+      <button type="button" data-panel-tab="manifest" class="panel-tab-btn px-2 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap text-zinc-400 hover:text-zinc-200">Manifest</button>
+    </div>
+
+    <!-- TAB 1: 3DGS & MAP (All Cesium SplatMap controls) -->
+    <div id="tab-content-map" class="flex flex-col gap-4">
+      <!-- Featured 3DGS Showcase -->
+      <section class="space-y-2">
+        <div class="flex items-center justify-between text-xs">
+          <h3 class="font-medium text-zinc-300">Featured 3DGS Tileset</h3>
+          <span class="text-[11px] font-mono text-indigo-300">HLOD 3D Tiles</span>
+        </div>
+        <button id="btn-load-redmond" type="button" class="w-full flex items-center justify-between gap-2 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 rounded-xl px-3.5 py-2.5 text-left transition-all active:scale-[0.99] cursor-pointer">
+          <div>
+            <div class="text-xs font-semibold text-indigo-100">Load 110M-Splat Campus</div>
+            <div class="text-[11px] text-indigo-300/80 font-mono">Cesium ion Asset #4547222</div>
+          </div>
+          <svg class="w-4 h-4 text-indigo-300 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+          </svg>
+        </button>
+      </section>
+
+      <!-- Custom Cesium ion Asset ID Loader -->
+      <section class="space-y-2.5 border-t border-zinc-800 pt-3">
+        <h3 class="text-xs font-medium text-zinc-300">Stream Cesium ion Asset ID</h3>
+        <div class="flex gap-2">
+          <input id="input-asset-id" type="number" inputmode="numeric" value="4547222" placeholder="Asset ID (e.g. 4547222)" class="flex-1 min-w-0 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500" />
+          <button id="btn-load-asset" type="button" class="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors shrink-0 cursor-pointer">Load</button>
+        </div>
+        <div id="tileset-list" class="space-y-1.5"></div>
+      </section>
+
+      <!-- Global Base World Layers -->
+      <section class="space-y-2 border-t border-zinc-800 pt-3">
+        <h3 class="text-xs font-medium text-zinc-300">Base World Layers</h3>
+        <div class="grid grid-cols-2 gap-2">
+          <button id="btn-toggle-terrain" type="button" class="px-3 py-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-300 transition-colors text-left cursor-pointer">
+            <div class="text-[11px] font-semibold">World Terrain</div>
+            <div id="status-terrain" class="text-[10px] text-zinc-400">Off</div>
+          </button>
+          <button id="btn-toggle-google3d" type="button" class="px-3 py-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-300 transition-colors text-left cursor-pointer">
+            <div class="text-[11px] font-semibold">Google 3D Tiles</div>
+            <div id="status-google3d" class="text-[10px] text-zinc-400">Off</div>
+          </button>
+        </div>
+      </section>
+
+      <!-- Real-Time Weather Overlay (OpenWeatherMap API + 3D Globe Vectors) -->
+      <section class="space-y-2.5 border-t border-zinc-800 pt-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-medium text-zinc-300">Weather Overlay (OWM)</h3>
+          <button id="btn-toggle-3d-weather" type="button" class="text-[11px] font-mono text-sky-300 hover:text-sky-200 transition-colors cursor-pointer">3D Wind: On</button>
+        </div>
+        <div class="grid grid-cols-5 gap-1">
+          <button type="button" data-weather-layer="off" class="weather-layer-btn px-1.5 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/40 text-[11px] font-medium text-indigo-200 transition-colors cursor-pointer">Off</button>
+          <button type="button" data-weather-layer="clouds_new" class="weather-layer-btn px-1.5 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-medium text-zinc-300 transition-colors cursor-pointer">Clouds</button>
+          <button type="button" data-weather-layer="wind_new" class="weather-layer-btn px-1.5 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-medium text-zinc-300 transition-colors cursor-pointer">Wind</button>
+          <button type="button" data-weather-layer="precipitation_new" class="weather-layer-btn px-1.5 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-medium text-zinc-300 transition-colors cursor-pointer">Precip</button>
+          <button type="button" data-weather-layer="temp_new" class="weather-layer-btn px-1.5 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-medium text-zinc-300 transition-colors cursor-pointer">Temp</button>
+        </div>
+        <div class="space-y-1">
+          <div class="flex justify-between text-[11px]">
+            <span class="text-zinc-400">Layer Opacity</span>
+            <span id="val-weather-opacity" class="text-zinc-200 font-mono tabular-nums">65%</span>
+          </div>
+          <input id="slider-weather-opacity" type="range" min="15" max="100" step="5" value="65" class="w-full accent-sky-400 cursor-pointer h-1.5 bg-zinc-800 rounded-lg" />
+        </div>
+      </section>
+
+      <!-- Clipping Assist GeoJSON Cutout Slot -->
+      <section class="space-y-2 border-t border-zinc-800 pt-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-medium text-zinc-300">Clipping Polygon (GeoJSON)</h3>
+          <span id="clip-status" class="text-[11px] text-zinc-500 font-mono">None</span>
+        </div>
+        <div class="flex gap-1.5">
+          <input id="input-clip-asset-id" type="number" inputmode="numeric" placeholder="GeoJSON Asset ID" class="flex-1 min-w-0 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs font-mono text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500" />
+          <button id="btn-apply-clip" type="button" class="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors shrink-0 cursor-pointer">Clip</button>
+          <button id="btn-clear-clip" type="button" class="px-2.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-colors shrink-0 cursor-pointer" title="Remove Clipping Cutout">×</button>
+        </div>
+        <p class="text-[11px] text-zinc-500 leading-snug">Cuts an exact footprint out of Google 3D Tiles and World Terrain using a Cesium ion GeoJSON asset.</p>
+      </section>
+
+      <!-- 3DGS / 3D Tiles Tuning -->
+      <section class="space-y-3 border-t border-zinc-800 pt-3">
+        <h3 class="text-xs font-medium text-zinc-300">LOD &amp; Geotrans Calibration</h3>
+
+        <div class="space-y-1.5">
+          <div class="flex justify-between text-xs">
+            <span class="text-zinc-400">LOD Screen Space Error</span>
+            <span id="val-sse" class="text-zinc-200 font-mono tabular-nums">8 px</span>
+          </div>
+          <input id="slider-sse" type="range" min="1" max="32" step="1" value="8" class="w-full accent-indigo-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg" />
+          <div class="flex justify-between text-[10px] text-zinc-500">
+            <span>Crisp (Heavy)</span>
+            <span>Fast (Light)</span>
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <div class="flex justify-between text-xs">
+            <span class="text-zinc-400">Ellipsoidal Height Nudge</span>
+            <span id="val-height-offset" class="text-zinc-200 font-mono tabular-nums">0.0 m</span>
+          </div>
+          <input id="slider-height-offset" type="range" min="-60" max="60" step="0.5" value="0" class="w-full accent-indigo-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg" />
+          <p class="text-[11px] text-zinc-500 leading-snug">Compensates for EGM96/NAVD88 vs WGS84 ellipsoid offsets on active custom tilesets.</p>
+        </div>
+      </section>
+
+      <!-- Global Search & WGS84 Coordinate Jumper -->
+      <section class="space-y-2.5 border-t border-zinc-800 pt-3">
+        <h3 class="text-xs font-medium text-zinc-300">Search &amp; WGS84 Coordinate Jumper</h3>
+
+        <!-- Global Address Search -->
+        <div class="flex gap-1.5">
+          <input id="input-address-search" type="text" placeholder="Search city, address, or landmark..." class="flex-1 min-w-0 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500" />
+          <button id="btn-address-search" type="button" class="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-100 transition-colors shrink-0 cursor-pointer">Find</button>
+        </div>
+
+        <div class="grid grid-cols-3 gap-1.5">
+          <div>
+            <label for="input-lat" class="text-[10px] text-zinc-500 block mb-0.5">Lat (°)</label>
+            <input id="input-lat" type="number" step="0.0001" value="33.5021" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs font-mono text-zinc-200 tabular-nums focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label for="input-lon" class="text-[10px] text-zinc-500 block mb-0.5">Lon (°)</label>
+            <input id="input-lon" type="number" step="0.0001" value="-82.0226" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs font-mono text-zinc-200 tabular-nums focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label for="input-alt" class="text-[10px] text-zinc-500 block mb-0.5">Alt (m)</label>
+            <input id="input-alt" type="number" step="10" value="450" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs font-mono text-zinc-200 tabular-nums focus:outline-none focus:border-indigo-500" />
+          </div>
+        </div>
+        <button id="btn-fly-coords" type="button" class="w-full py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-100 transition-colors cursor-pointer">Fly To WGS84 Coordinates</button>
+
+        <!-- Quick Location Presets -->
+        <div class="grid grid-cols-3 gap-1.5 pt-0.5">
+          <button type="button" data-lat="33.5021" data-lon="-82.0226" data-alt="450" data-pitch="-35" class="preset-loc px-2 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-300 transition-colors cursor-pointer">Augusta</button>
+          <button type="button" data-lat="47.6423" data-lon="-122.1369" data-alt="280" data-pitch="-35" class="preset-loc px-2 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-300 transition-colors cursor-pointer">Redmond</button>
+          <button type="button" data-lat="36.0544" data-lon="-112.1401" data-alt="3500" data-pitch="-30" class="preset-loc px-2 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-300 transition-colors cursor-pointer">Canyon</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- TAB 2: VIRTUAL DRONE FLIGHT & VIDEO RECORDING -->
+    <div id="tab-content-flight" class="hidden flex-col gap-4">
+      <!-- Flight Mode Selection -->
+      <section class="space-y-2">
+        <div class="flex items-center justify-between text-xs">
+          <h3 class="font-medium text-zinc-300">Virtual Drone Flight Mode</h3>
+          <span id="flight-mode-status" class="text-[11px] font-mono text-zinc-400">Explore</span>
+        </div>
+        <div class="grid grid-cols-2 gap-1.5">
+          <button type="button" data-flight-mode="explore" class="flight-mode-btn px-3 py-2 rounded-xl bg-indigo-600/20 border border-indigo-500/40 text-xs font-medium text-indigo-200 transition-colors text-left cursor-pointer">
+            <div class="font-semibold">Explore</div>
+            <div class="text-[10px] text-indigo-300/75">Free Mouse / Touch</div>
+          </button>
+          <button type="button" data-flight-mode="wasd" class="flight-mode-btn px-3 py-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-300 transition-colors text-left cursor-pointer">
+            <div class="font-semibold">WASD Pilot</div>
+            <div class="text-[10px] text-zinc-400">6-DOF Keyboard</div>
+          </button>
+          <button type="button" data-flight-mode="orbit" class="flight-mode-btn px-3 py-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-300 transition-colors text-left cursor-pointer">
+            <div class="font-semibold">360° Orbit</div>
+            <div class="text-[10px] text-zinc-400">Auto Target Survey</div>
+          </button>
+          <button type="button" data-flight-mode="tour" class="flight-mode-btn px-3 py-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-300 transition-colors text-left cursor-pointer">
+            <div class="font-semibold">Tour Views</div>
+            <div class="text-[10px] text-zinc-400">Fly Saved Bookmarks</div>
+          </button>
+        </div>
+      </section>
+
+      <!-- Flight Speed & Orbit Rate -->
+      <section class="space-y-3 border-t border-zinc-800 pt-3">
+        <h3 class="text-xs font-medium text-zinc-300">Flight Kinematics</h3>
+
+        <div class="space-y-1.5">
+          <div class="flex justify-between text-xs">
+            <span class="text-zinc-400">WASD Airspeed</span>
+            <span id="val-flight-speed" class="text-zinc-200 font-mono tabular-nums">35 m/s</span>
+          </div>
+          <input id="slider-flight-speed" type="range" min="5" max="150" step="5" value="35" class="w-full accent-indigo-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg" />
+        </div>
+
+        <div class="space-y-1.5">
+          <div class="flex justify-between text-xs">
+            <span class="text-zinc-400">360° Orbit Speed</span>
+            <span id="val-orbit-speed" class="text-zinc-200 font-mono tabular-nums">18 °/s</span>
+          </div>
+          <input id="slider-orbit-speed" type="range" min="6" max="45" step="1" value="18" class="w-full accent-indigo-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg" />
+        </div>
+      </section>
+
+      <!-- 35mm Optical Lens Presets -->
+      <section class="space-y-2 border-t border-zinc-800 pt-3">
+        <div class="flex items-center justify-between text-xs">
+          <h3 class="font-medium text-zinc-300">Camera Lens (35mm Eq.)</h3>
+          <span id="val-lens-fov" class="text-[11px] font-mono text-zinc-400 tabular-nums">24mm · 53.1°</span>
+        </div>
+        <div class="grid grid-cols-4 gap-1.5">
+          <button type="button" data-lens-mm="18" class="lens-btn px-2 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono text-zinc-300 transition-colors cursor-pointer">18mm</button>
+          <button type="button" data-lens-mm="24" class="lens-btn px-2 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/40 text-xs font-mono text-indigo-200 transition-colors cursor-pointer">24mm</button>
+          <button type="button" data-lens-mm="35" class="lens-btn px-2 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono text-zinc-300 transition-colors cursor-pointer">35mm</button>
+          <button type="button" data-lens-mm="50" class="lens-btn px-2 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono text-zinc-300 transition-colors cursor-pointer">50mm</button>
+        </div>
+      </section>
+
+      <!-- Aerial Video & Photo Capture -->
+      <section class="space-y-2.5 border-t border-zinc-800 pt-3">
+        <div class="flex items-center justify-between text-xs">
+          <h3 class="font-medium text-zinc-300">Aerial Video Capture</h3>
+          <span id="rec-clip-count" class="text-[11px] font-mono text-zinc-500 tabular-nums">0 clips</span>
+        </div>
+
+        <div class="grid grid-cols-2 gap-1.5">
+          <button id="btn-rec-free" type="button" class="px-3 py-2 rounded-xl bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-xs font-semibold text-red-200 transition-colors cursor-pointer whitespace-nowrap">Record Flight</button>
+          <button id="btn-rec-orbit" type="button" class="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition-colors cursor-pointer whitespace-nowrap">1-Lap 360° Clip</button>
+        </div>
+
+        <button id="btn-snapshot-png" type="button" class="w-full py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 transition-colors cursor-pointer">Capture High-Res Snapshot (PNG)</button>
+
+        <!-- Recorded Clips List -->
+        <div id="clip-list" class="space-y-1.5"></div>
+      </section>
+    </div>
+
+    <!-- TAB 3: SITE MANIFEST, BOOKMARKS & 3D MEASUREMENTS -->
+    <div id="tab-content-manifest" class="hidden flex-col gap-4">
+      <!-- Site Manifest Builder (Shared Web + Unreal Engine Contract) -->
+      <section class="space-y-2.5">
+        <div class="flex items-center justify-between text-xs">
+          <h3 class="font-medium text-zinc-300">Site Manifest (UE5 + Web)</h3>
+          <span class="text-[11px] font-mono text-emerald-300">Schema 1.0</span>
+        </div>
+        <div class="grid grid-cols-2 gap-1.5">
+          <div>
+            <label for="input-site-title" class="text-[10px] text-zinc-500 block mb-0.5">Site Title</label>
+            <input id="input-site-title" type="text" value="SplatMap Site" placeholder="Site Name" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label for="input-source-crs" class="text-[10px] text-zinc-500 block mb-0.5">Source CRS (Geotrans)</label>
+            <input id="input-source-crs" type="text" value="NAD83 / NAVD88" placeholder="e.g. MGRS / NAVD88" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500" />
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-1.5">
+          <button id="btn-load-manifest" type="button" class="px-2 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 transition-colors cursor-pointer">Load JSON</button>
+          <button id="btn-export-manifest" type="button" class="px-2 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-xs font-medium text-emerald-300 transition-colors cursor-pointer">Export JSON</button>
+          <button id="btn-copy-manifest" type="button" class="px-2 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-colors cursor-pointer" title="Copy manifest JSON to clipboard">Copy</button>
+        </div>
+      </section>
+
+      <!-- Camera Bookmarks (Saved into site_manifest.json) -->
+      <section class="space-y-2 border-t border-zinc-800 pt-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-medium text-zinc-300">Camera Bookmarks</h3>
+          <span id="bookmark-count" class="text-[11px] font-mono text-zinc-500 tabular-nums">0 saved</span>
+        </div>
+        <div class="flex gap-1.5">
+          <input id="input-bookmark-name" type="text" placeholder="View name (e.g. Hero Shot)" class="flex-1 min-w-0 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500" />
+          <button id="btn-save-bookmark" type="button" class="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors shrink-0 cursor-pointer">Save</button>
+        </div>
+        <div id="bookmark-list" class="space-y-1.5"></div>
+      </section>
+
+      <!-- 3D Surface Measurement Tools -->
+      <section class="space-y-2.5 border-t border-zinc-800 pt-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-medium text-zinc-300">3D Surface Measurement</h3>
+          <span id="measure-status" class="text-[11px] font-mono text-zinc-500">Idle</span>
+        </div>
+        <div class="grid grid-cols-3 gap-1.5">
+          <button id="btn-measure-distance" type="button" class="px-2 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-200 transition-colors cursor-pointer">Distance</button>
+          <button id="btn-measure-area" type="button" class="px-2 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-200 transition-colors cursor-pointer">Area</button>
+          <button id="btn-measure-clear" type="button" class="px-2 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer">Clear</button>
+        </div>
+        <div id="measure-readout" class="hidden rounded-xl bg-zinc-950/80 border border-zinc-800 px-3 py-2 text-xs font-mono text-zinc-200 tabular-nums space-y-1">
+          <div id="measure-primary" class="font-semibold text-indigo-300">0.0 m</div>
+          <div id="measure-secondary" class="text-[11px] text-zinc-400">Click points on the 3D surface. Right-click to finish.</div>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- Bottom-Left Collapsible Telemetry & Health Log -->
+  <section id="health-panel" class="hidden sm:flex absolute bottom-14 left-4 z-20 w-[calc(100vw-2rem)] sm:w-80 bg-zinc-900/90 backdrop-blur-md border border-zinc-800/80 rounded-2xl p-3.5 shadow-2xl flex-col gap-2.5 transition-all duration-150">
+    <div class="flex items-center justify-between border-b border-zinc-800 pb-2">
+      <div class="flex items-center gap-2">
+        <span id="health-dot" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+        <h2 class="text-xs font-semibold tracking-wide text-zinc-300">Globe Telemetry</h2>
+        <span class="text-zinc-600" aria-hidden="true">·</span>
+        <span id="health-badge" class="text-[11px] font-mono text-emerald-300">Ready</span>
+      </div>
+      <button id="btn-close-health" type="button" class="p-1 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" title="Hide Telemetry">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <div class="grid grid-cols-3 gap-1.5">
+      <div class="bg-zinc-950/70 border border-zinc-800/70 rounded-xl p-2">
+        <div class="text-[10px] text-zinc-500">FPS</div>
+        <div id="metric-fps" class="text-xs font-mono font-semibold text-zinc-100 tabular-nums">--</div>
+      </div>
+      <div class="bg-zinc-950/70 border border-zinc-800/70 rounded-xl p-2">
+        <div class="text-[10px] text-zinc-500">Cam Alt</div>
+        <div id="metric-alt" class="text-xs font-mono font-semibold text-zinc-100 tabular-nums">--</div>
+      </div>
+      <div class="bg-zinc-950/70 border border-zinc-800/70 rounded-xl p-2">
+        <div class="text-[10px] text-zinc-500">Tilesets</div>
+        <div id="metric-tilesets" class="text-xs font-mono font-semibold text-zinc-100 tabular-nums">0</div>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-between bg-zinc-950/70 border border-zinc-800/70 rounded-xl px-2.5 py-1.5 text-[11px]">
+      <span id="metric-latlon" class="font-mono text-zinc-300 tabular-nums">0.0000°, 0.0000°</span>
+      <span id="metric-hdg-pitch" class="font-mono text-zinc-500 tabular-nums">H 0° · P -90°</span>
+    </div>
+
+    <div id="health-log-list" class="h-24 overflow-y-auto bg-zinc-950/80 border border-zinc-800/70 rounded-xl p-2 space-y-1 font-mono text-[11px] leading-snug select-text"></div>
+  </section>
+
+  <!-- Right Collapsible Co-Pilot Drawer (Text + Gemini Live Voice) -->
+  <aside id="copilot-drawer" aria-hidden="true" class="hidden absolute top-20 sm:top-4 right-4 z-30 w-[calc(100vw-2rem)] sm:w-96 h-[calc(100vh-10rem)] sm:h-[calc(100vh-5.5rem)] bg-zinc-900/95 backdrop-blur-md border border-zinc-800/80 rounded-2xl shadow-2xl flex-col overflow-hidden transition-all duration-150">
+    <!-- Drawer Header -->
+    <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-zinc-800 shrink-0">
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="flex items-center justify-center w-6 h-6 rounded-lg bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 shrink-0">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 9.75a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375m-13.5 3.01c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.184-4.183a1.14 1.14 0 01.778-.332 48.294 48.294 0 005.83-.498c1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+          </svg>
+        </div>
+        <h2 class="text-xs font-semibold tracking-wide text-zinc-100 truncate">NoDRONE Co-Pilot</h2>
+      </div>
+      <div class="flex items-center gap-1 shrink-0">
+        <button id="btn-copilot-clear" type="button" class="px-2 py-1 rounded-lg text-[11px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" title="Clear conversation">Clear</button>
+        <button id="btn-close-copilot" type="button" class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer" title="Hide Co-Pilot">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Gemini Live Voice Session Bar (hidden until active) -->
+    <div id="copilot-voice-bar" class="hidden items-center justify-between gap-2 px-4 py-2 bg-emerald-950/50 border-b border-emerald-500/30 shrink-0">
+      <div class="flex items-center gap-2 min-w-0">
+        <span id="copilot-voice-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+        <span id="copilot-voice-status" class="text-[11px] font-medium text-emerald-200 truncate">Voice Live — Listening</span>
+      </div>
+      <button id="btn-copilot-stop-voice" type="button" class="px-2.5 py-1 rounded-lg bg-red-600/80 hover:bg-red-500 text-[11px] font-semibold text-white transition-colors cursor-pointer shrink-0">End Voice</button>
+    </div>
+
+    <!-- Scrollable Chat Messages & Tool Call Chips -->
+    <div id="copilot-messages" class="flex-1 overflow-y-auto p-4 space-y-3 select-text">
+      <div id="copilot-empty" class="space-y-3 py-2">
+        <p class="text-xs text-zinc-400 leading-relaxed">
+          Operate the globe, 3DGS tilesets, camera flight, recording, weather, and site manifests by text or live voice.
+        </p>
+        <div class="space-y-1.5">
+          <button type="button" data-copilot-prompt="Fly to Augusta, Georgia" class="copilot-quick-btn w-full text-left px-3 py-2 rounded-xl bg-zinc-950/75 hover:bg-zinc-800/80 border border-zinc-800 text-xs text-zinc-300 transition-colors cursor-pointer">
+            Fly to Augusta, Georgia
+          </button>
+          <button type="button" data-copilot-prompt="Turn on Google 3D tiles" class="copilot-quick-btn w-full text-left px-3 py-2 rounded-xl bg-zinc-950/75 hover:bg-zinc-800/80 border border-zinc-800 text-xs text-zinc-300 transition-colors cursor-pointer">
+            Turn on Google 3D tiles
+          </button>
+          <button type="button" data-copilot-prompt="Start a 360 orbit and record one lap" class="copilot-quick-btn w-full text-left px-3 py-2 rounded-xl bg-zinc-950/75 hover:bg-zinc-800/80 border border-zinc-800 text-xs text-zinc-300 transition-colors cursor-pointer">
+            Start a 360 orbit and record one lap
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat Input + Gemini Live Mic Bar -->
+    <form id="copilot-form" class="p-3 border-t border-zinc-800 bg-zinc-950/60 flex items-center gap-2 shrink-0">
+      <button id="btn-copilot-mic" type="button" class="flex items-center justify-center w-9 h-9 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/70 text-zinc-300 hover:text-white transition-colors shrink-0 cursor-pointer" title="Toggle Gemini Live Voice (speak & listen)">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+        </svg>
+      </button>
+      <input id="copilot-input" type="text" autocomplete="off" placeholder="Command Co-Pilot..." class="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500" />
+      <button id="btn-copilot-send" type="submit" class="flex items-center justify-center px-3 h-9 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white transition-colors shrink-0 cursor-pointer">
+        Send
+      </button>
+    </form>
+  </aside>
+
+  <!-- Bottom-Right Floating Compact Dock -->
+  <nav class="absolute bottom-4 right-4 z-40 max-w-[calc(100vw-2rem)] overflow-x-auto flex items-center gap-1 sm:gap-1.5 bg-zinc-900/88 backdrop-blur-md border border-zinc-800/80 rounded-2xl p-1.5 shadow-2xl">
+    <button id="btn-home" type="button" class="px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer whitespace-nowrap shrink-0" title="Reset Global View">Globe</button>
+    <button id="btn-toggle-weather" type="button" class="px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium bg-sky-500/15 text-sky-300 border border-sky-500/30 hover:bg-sky-500/25 transition-colors cursor-pointer whitespace-nowrap shrink-0" title="Toggle Site Weather Overlay">Weather</button>
+    <button id="btn-quick-record" type="button" class="px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer whitespace-nowrap shrink-0" title="Record Aerial Clip">Record</button>
+    <button id="btn-toggle-health" type="button" class="flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition-colors cursor-pointer whitespace-nowrap shrink-0">
+      <span id="dock-health-dot" class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+      <span>Telemetry</span>
+    </button>
+    <button id="btn-toggle-panel" type="button" class="px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors cursor-pointer whitespace-nowrap shrink-0">Controls</button>
+    <button id="btn-toggle-copilot" type="button" class="flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium bg-indigo-600/20 text-indigo-200 border border-indigo-500/35 hover:bg-indigo-600/35 transition-colors cursor-pointer whitespace-nowrap shrink-0" title="Open NoDRONE Co-Pilot">
+      <span id="dock-copilot-dot" class="hidden w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+      <span>Co-Pilot</span>
+    </button>
+  </nav>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="fixed bottom-16 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

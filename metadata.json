@@ -1,0 +1,9 @@
+{
+  "name": "NoDRONE",
+  "description": "CesiumJS 3DGS SplatMap Viewer, Virtual Drone Flight Engine, Aerial Video Recorder & Geospatial Site Manifest Workbench",
+  "requestFramePermissions": ["microphone"],
+  "prompt": "",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

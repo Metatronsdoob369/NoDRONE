@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: #09090b;
+    color: #f4f4f5;
+    color-scheme: dark;
+  }
+}
+
+/* Minimal Cesium Credit & Widget Overrides */
+.cesium-viewer-bottom {
+  left: 1rem !important;
+  bottom: 0.35rem !important;
+  opacity: 0.72;
+  font-size: 10px !important;
+}
+
+.cesium-credit-logoContainer img {
+  max-height: 18px !important;
+}
+
+/* Subtle Dark Scrollbars for Mission Control & Telemetry Logs */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(113, 113, 122, 0.35);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(161, 161, 170, 0.55);
+}
