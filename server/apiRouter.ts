@@ -1,25 +1,26 @@
-import { IncomingMessage, ServerResponse } from 'http';
-import { 
-  generateRoofAudit, 
-  generateCommercialProposal, 
-  handleAIChat, 
+import type { IncomingMessage, ServerResponse } from 'http';
+import {
+  generateRoofAudit,
+  generateCommercialProposal,
+  handleAIChat,
   generateDroneVideoPrompt,
   analyzeDroneFlightClip,
-  BuildingContext 
-} from './geminiService.js';
+} from './geminiService.ts';
+import type { BuildingContext } from './geminiService.ts';
 import {
   ALLOWED_WEATHER_LAYERS,
-  WeatherTileLayer,
   fetchOpenWeatherTile,
   fetchSiteWeather,
   hasOpenWeatherMapKey,
-} from './weatherService.js';
+} from './weatherService.ts';
+import type { WeatherTileLayer } from './weatherService.ts';
 import {
   COPILOT_FLASH_MODEL,
   COPILOT_LIVE_MODEL,
   getActiveCopilotConfig,
   runCopilotTurn,
-} from './copilotService.js';
+  runWebSearch,
+} from './copilotService.ts';
 
 function parseJsonBody<T>(req: IncomingMessage): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -438,6 +439,25 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
       }
       console.error('API /api/copilot/turn error:', cleanMessage);
       sendJson(res, status >= 400 && status < 600 ? status : 500, { error: cleanMessage });
+      return true;
+    }
+  }
+
+  // 10b. NoDRONE Co-Pilot Live Web Search & Grounded Research Endpoint
+  if (url.startsWith('/api/copilot/search') && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ query?: string }>(req);
+      const query = String(body?.query || '').trim();
+      if (!query) {
+        sendJson(res, 400, { ok: false, error: 'Search query is required.' });
+        return true;
+      }
+      const result = await runWebSearch(query);
+      sendJson(res, result.ok ? 200 : 502, result);
+      return true;
+    } catch (err: any) {
+      console.error('API /api/copilot/search error:', err?.message || err);
+      sendJson(res, 500, { ok: false, error: err?.message || 'Web search failed.' });
       return true;
     }
   }

@@ -1,18 +1,21 @@
 import type {
+  ActiveCard,
   CameraBookmark,
   CameraState,
   CopilotContextSnapshot,
   CopilotToolResult,
   FlightMode,
   HealthState,
+  HudMode,
   LogLevel,
   MeasureMode,
   NoDroneController,
-  PanelTab,
   RecordedClip,
   SiteManifest,
   SiteWeatherData,
   TilesetEntry,
+  UiControlEntry,
+  UiStateSnapshot,
   WeatherTileLayer,
   WeatherUnitSystem,
 } from './types';
@@ -185,10 +188,11 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
   let activeClippingCollection: any = null;
   let cameraBookmarks: CameraBookmark[] = [];
 
-  // UI Visibility State (Controls starts closed by default on load so Co-Pilot / globe open cleanly)
-  let panelVisible = false;
-  let healthVisible = window.innerWidth >= 640;
-  let activeTab: PanelTab = 'map';
+  // Chronograph HUD Choreography State (Clean globe on launch; single active card above bottom rail)
+  let activeCard: ActiveCard = null;
+  let hudMode: HudMode = 'rail';
+  let spotlightTimer: number | null = null;
+  let spotlightCleanup: (() => void) | null = null;
 
   // Virtual Drone Flight State
   let flightMode: FlightMode = 'explore';
@@ -233,13 +237,19 @@ let cameraPathRemove: (() => void) | null = null;
   let measureEntities: any[] = [];
   let measureHandler: any = null;
 
-  // Telemetry State
+  // Telemetry & Chronograph Cluster Gauge State
   let frameCount = 0;
   let lastFpsCheck = performance.now();
   let smoothedFps = 60;
+  let clusterUnits: 'imperial' | 'metric' = 'imperial';
+  let clusterCollapsed = false;
+  let lastClusterSampleMs = 0;
+  let prevCamPosCartesian: any = null;
+  let prevCamAltMeters: number | null = null;
+  let smoothedSpeedMps = 0;
+  let smoothedClimbMps = 0;
 
   // Real-Time Weather Overlay State
-  let weatherVisible = window.innerWidth >= 640;
   let weatherUnits: WeatherUnitSystem = 'imperial';
   let activeWeatherLayer: WeatherTileLayer = 'off';
   let weatherOpacity = 0.65;
@@ -262,8 +272,10 @@ let cameraPathRemove: (() => void) | null = null;
   const ionStatusText = el<HTMLSpanElement>('ion-status-text');
   const loadingOverlay = el<HTMLDivElement>('loading-overlay');
   const loadingText = el<HTMLParagraphElement>('loading-text');
-  const controlPanel = el<HTMLElement>('control-panel');
-  const healthPanel = el<HTMLElement>('health-panel');
+  const cardStage = el<HTMLDivElement>('card-stage');
+  const summonGrid = el<HTMLElement>('summon-grid');
+  const flightClusterGauge = el<HTMLElement>('flight-cluster-gauge');
+  const spotlightTag = el<HTMLDivElement>('copilot-spotlight-tag');
   const healthLogList = el<HTMLDivElement>('health-log-list');
   const tilesetListEl = el<HTMLDivElement>('tileset-list');
   const bookmarkListEl = el<HTMLDivElement>('bookmark-list');
@@ -290,7 +302,6 @@ let cameraPathRemove: (() => void) | null = null;
   const clipModalMeta = el<HTMLParagraphElement>('clip-modal-meta');
   const clipModalDownload = el<HTMLAnchorElement>('btn-download-clip-modal');
   const webglFallback = el<HTMLDivElement>('webgl-fallback');
-  const weatherHud = el<HTMLElement>('weather-hud');
 
   function showToast(message: string, type: 'info' | 'error' = 'info'): void {
     if (!toastContainer) return;
@@ -367,25 +378,6 @@ let cameraPathRemove: (() => void) | null = null;
     }
   }
 
-  function setPanelTab(tab: PanelTab): void {
-    activeTab = tab;
-    const tabs: PanelTab[] = ['map', 'flight', 'manifest'];
-    tabs.forEach((t) => {
-      const content = el<HTMLDivElement>(`tab-content-${t}`);
-      if (content) {
-        content.classList.toggle('hidden', t !== tab);
-        content.classList.toggle('flex', t === tab);
-      }
-    });
-
-    document.querySelectorAll<HTMLButtonElement>('.panel-tab-btn').forEach((btn) => {
-      const isSelected = btn.dataset.panelTab === tab;
-      btn.className = isSelected
-        ? 'panel-tab-btn glass-btn px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap bg-white/[0.14] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.16)]'
-        : 'panel-tab-btn glass-btn px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap text-zinc-300/80 hover:text-white';
-    });
-  }
-
   function applyLensPreset(focalLengthMm: number): void {
     activeLensMm = focalLengthMm;
     // Full-frame 35mm sensor vertical height = 24mm -> vFOV = 2 * atan(24 / (2 * f))
@@ -402,10 +394,7 @@ let cameraPathRemove: (() => void) | null = null;
 
     document.querySelectorAll<HTMLButtonElement>('.lens-btn').forEach((btn) => {
       const mm = Number(btn.dataset.lensMm);
-      btn.className =
-        mm === focalLengthMm
-          ? 'lens-btn px-2 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/40 text-xs font-mono text-indigo-200 transition-colors cursor-pointer'
-          : 'lens-btn px-2 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono text-zinc-300 transition-colors cursor-pointer';
+      btn.setAttribute('data-active', String(mm === focalLengthMm));
     });
 
     logEvent(`Lens set to ${focalLengthMm}mm eq. (${vFovDeg.toFixed(1)}° vFOV).`, 'info');
@@ -459,14 +448,7 @@ let cameraPathRemove: (() => void) | null = null;
 
     document.querySelectorAll<HTMLButtonElement>('.flight-mode-btn').forEach((btn) => {
       const m = btn.dataset.flightMode as FlightMode;
-      const active = m === flightMode;
-      btn.className = active
-        ? 'flight-mode-btn px-3 py-2 rounded-xl bg-indigo-600/20 border border-indigo-500/40 text-xs font-medium text-indigo-200 transition-colors text-left cursor-pointer'
-        : 'flight-mode-btn px-3 py-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-300 transition-colors text-left cursor-pointer';
-      const sub = btn.querySelector('div:last-child');
-      if (sub) {
-        sub.className = active ? 'text-[10px] text-indigo-300/80' : 'text-[10px] text-zinc-400';
-      }
+      btn.setAttribute('data-active', String(m === flightMode));
     });
 
     if (flightHudBanner && flightHudLabel && flightHudHint) {
@@ -1340,9 +1322,10 @@ let cameraPathRemove: (() => void) | null = null;
     // Hide app HUD panels only — explicitly keep Cesium/Google credit container visible
     const hudElements = [
       document.querySelector('header') as HTMLElement | null,
-      weatherHud,
-      controlPanel,
-      healthPanel,
+      flightClusterGauge,
+      cardStage,
+      summonGrid,
+      spotlightTag,
       el<HTMLElement>('copilot-drawer'),
       flightHudBanner,
       recIndicator,
@@ -1835,15 +1818,11 @@ let cameraPathRemove: (() => void) | null = null;
     if (statusEl) {
       statusEl.textContent = mode === 'off' ? 'Idle' : mode === 'distance' ? 'Distance' : 'Area';
       statusEl.className =
-        mode === 'off' ? 'text-[11px] font-mono text-zinc-500' : 'text-[11px] font-mono text-indigo-300';
+        mode === 'off' ? 'text-[10px] font-mono text-slate-400' : 'text-[10px] font-mono text-[#e7cb88]';
     }
 
-    const activeCls =
-      'px-2 py-2 rounded-xl bg-indigo-600/25 border border-indigo-500/50 text-xs font-semibold text-indigo-200 transition-colors cursor-pointer';
-    const idleCls =
-      'px-2 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-200 transition-colors cursor-pointer';
-    if (btnDist) btnDist.className = mode === 'distance' ? activeCls : idleCls;
-    if (btnArea) btnArea.className = mode === 'area' ? activeCls : idleCls;
+    if (btnDist) btnDist.setAttribute('data-active', String(mode === 'distance'));
+    if (btnArea) btnArea.setAttribute('data-active', String(mode === 'area'));
 
     if (measureHandler) {
       measureHandler.destroy();
@@ -2037,6 +2016,8 @@ let cameraPathRemove: (() => void) | null = null;
       condEl.textContent = data.description || data.condition;
     }
     if (tempEl) tempEl.textContent = formatTemp(data.tempC);
+    const railTempEl = el<HTMLSpanElement>('rail-weather-temp');
+    if (railTempEl) railTempEl.textContent = formatTemp(data.tempC);
     if (feelsEl) feelsEl.textContent = `Feels ${formatTemp(data.feelsLikeC)}`;
     if (windEl) windEl.textContent = formatWind(data.windSpeedMps);
     if (windDirEl) {
@@ -2061,10 +2042,10 @@ let cameraPathRemove: (() => void) | null = null;
       advEl.textContent = data.flightAdvisoryLabel;
       advEl.className =
         data.flightAdvisory === 'high-wind'
-          ? 'font-medium text-red-300 whitespace-nowrap shrink-0'
+          ? 'font-mono font-medium text-red-300 whitespace-nowrap shrink-0'
           : data.flightAdvisory === 'caution'
-            ? 'font-medium text-amber-300 whitespace-nowrap shrink-0'
-            : 'font-medium text-emerald-300 whitespace-nowrap shrink-0';
+            ? 'font-mono font-medium text-amber-300 whitespace-nowrap shrink-0'
+            : 'font-mono font-medium text-emerald-300 whitespace-nowrap shrink-0';
     }
     if (unitBtn) {
       unitBtn.textContent = weatherUnits === 'imperial' ? '°F' : '°C';
@@ -2087,9 +2068,7 @@ let cameraPathRemove: (() => void) | null = null;
 
     document.querySelectorAll<HTMLButtonElement>('.weather-layer-btn').forEach((btn) => {
       const isSelected = btn.dataset.weatherLayer === layer;
-      btn.className = isSelected
-        ? 'weather-layer-btn px-1.5 py-1.5 rounded-lg bg-indigo-600/20 border border-indigo-500/40 text-[11px] font-medium text-indigo-200 transition-colors cursor-pointer'
-        : 'weather-layer-btn px-1.5 py-1.5 rounded-lg bg-zinc-950/70 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-medium text-zinc-300 transition-colors cursor-pointer';
+      btn.setAttribute('data-active', String(isSelected));
     });
 
     if (layer === 'off' || !viewer) {
@@ -2607,20 +2586,12 @@ let cameraPathRemove: (() => void) | null = null;
 
   function updateLayerButton(btnId: string, statusId: string, active: boolean): void {
     const btn = el<HTMLButtonElement>(btnId);
-    const status = el<HTMLDivElement>(statusId);
+    const status = el<HTMLElement>(statusId);
     if (!btn || !status) return;
 
-    if (active) {
-      btn.className =
-        'px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-xs font-medium text-indigo-200 transition-colors text-left cursor-pointer';
-      status.className = 'text-[10px] text-indigo-300';
-      status.textContent = 'Active';
-    } else {
-      btn.className =
-        'px-3 py-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/70 text-xs font-medium text-zinc-300 transition-colors text-left cursor-pointer';
-      status.className = 'text-[10px] text-zinc-400';
-      status.textContent = 'Off';
-    }
+    btn.setAttribute('data-active', String(active));
+    status.className = active ? 'text-[10px] font-mono text-[#e7cb88]' : 'text-[10px] font-mono text-slate-400';
+    status.textContent = active ? 'On' : 'Off';
   }
 
   function renderTilesetList(): void {
@@ -2952,9 +2923,12 @@ let cameraPathRemove: (() => void) | null = null;
 
       const btnFly = document.createElement('button');
       btnFly.type = 'button';
-      btnFly.className = 'px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[10px] font-medium text-zinc-200 transition-colors cursor-pointer';
+      btnFly.className = 'chrono-pusher px-2 py-1 rounded-md text-[10px] font-medium cursor-pointer';
       btnFly.textContent = 'Fly';
-      btnFly.addEventListener('click', () => flyToBookmark(bm));
+      btnFly.addEventListener('click', () => {
+        flyToBookmark(bm);
+        setActiveCard(null);
+      });
 
       const btnDel = document.createElement('button');
       btnDel.type = 'button';
@@ -3279,6 +3253,8 @@ let cameraPathRemove: (() => void) | null = null;
   function updateTelemetry(): void {
     frameCount++;
     const now = performance.now();
+    updateFlightClusterGauge(now);
+
     if (now - lastFpsCheck < 500) return;
 
     const elapsed = now - lastFpsCheck;
@@ -3288,11 +3264,14 @@ let cameraPathRemove: (() => void) | null = null;
     lastFpsCheck = now;
 
     const fpsEl = el<HTMLDivElement>('metric-fps');
+    const railFpsEl = el<HTMLSpanElement>('rail-fps-val');
     const altEl = el<HTMLDivElement>('metric-alt');
     const latLonEl = el<HTMLSpanElement>('metric-latlon');
     const hdgPitchEl = el<HTMLSpanElement>('metric-hdg-pitch');
 
-    if (fpsEl) fpsEl.textContent = `${Math.round(smoothedFps)}`;
+    const roundedFps = Math.round(smoothedFps);
+    if (fpsEl) fpsEl.textContent = `${roundedFps}`;
+    if (railFpsEl) railFpsEl.textContent = `${roundedFps} fps`;
 
     if (viewer?.camera?.positionCartographic) {
       const carto = viewer.camera.positionCartographic;
@@ -3314,23 +3293,150 @@ let cameraPathRemove: (() => void) | null = null;
     else setHealthState('ok');
   }
 
+  function applyClusterUnitLabels(): void {
+    const btn = el<HTMLButtonElement>('btn-cluster-units');
+    const altUnitEl = el<HTMLSpanElement>('gauge-alt-unit');
+    const spdUnitEl = el<HTMLSpanElement>('gauge-spd-unit');
+    const l1 = el<HTMLElement>('gauge-spd-lbl-1');
+    const l2 = el<HTMLElement>('gauge-spd-lbl-2');
+    const l3 = el<HTMLElement>('gauge-spd-lbl-3');
+    const l4 = el<HTMLElement>('gauge-spd-lbl-4');
+
+    const isImp = clusterUnits === 'imperial';
+    if (btn) btn.textContent = isImp ? 'FT·KT' : 'M·M/S';
+    if (altUnitEl) altUnitEl.textContent = isImp ? 'FT' : 'M';
+    if (spdUnitEl) spdUnitEl.textContent = isImp ? 'KT' : 'M/S';
+    if (l1) l1.textContent = isImp ? '40' : '20';
+    if (l2) l2.textContent = isImp ? '80' : '40';
+    if (l3) l3.textContent = isImp ? '120' : '60';
+    if (l4) l4.textContent = isImp ? '160' : '80';
+  }
+
+  function updateFlightClusterGauge(nowMs: number): void {
+    if (!viewer?.camera?.positionWC || !viewer?.camera?.positionCartographic) return;
+    if (nowMs - lastClusterSampleMs < 55) return;
+
+    const dtSec = lastClusterSampleMs > 0 ? Math.max(0.016, (nowMs - lastClusterSampleMs) / 1000) : 0.055;
+    lastClusterSampleMs = nowMs;
+
+    const currPos = viewer.camera.positionWC;
+    const carto = viewer.camera.positionCartographic;
+    const altMeters = Math.max(0, carto.height);
+    const hdgDeg = ((Math.round(Cesium.Math.toDegrees(viewer.camera.heading)) % 360) + 360) % 360;
+
+    if (prevCamPosCartesian) {
+      const distMeters = Cesium.Cartesian3.distance(prevCamPosCartesian, currPos);
+      // Clamp huge jump spikes (e.g. instant teleport) while staying responsive to flights
+      const instSpeedMps = distMeters / dtSec;
+      const clampedInst = instSpeedMps > 2000 ? 0 : instSpeedMps;
+      smoothedSpeedMps = smoothedSpeedMps * 0.72 + clampedInst * 0.28;
+      if (smoothedSpeedMps < 0.08) smoothedSpeedMps = 0;
+    }
+    prevCamPosCartesian = Cesium.Cartesian3.clone(currPos, prevCamPosCartesian || new Cesium.Cartesian3());
+
+    if (prevCamAltMeters !== null) {
+      const instClimb = (altMeters - prevCamAltMeters) / dtSec;
+      const clampedClimb = Math.abs(instClimb) > 2000 ? 0 : instClimb;
+      smoothedClimbMps = smoothedClimbMps * 0.75 + clampedClimb * 0.25;
+    }
+    prevCamAltMeters = altMeters;
+
+    const hdgEl = el<HTMLSpanElement>('cluster-hdg');
+    if (hdgEl) hdgEl.textContent = `HDG ${String(hdgDeg).padStart(3, '0')}°`;
+
+    if (clusterCollapsed) return;
+
+    const isImp = clusterUnits === 'imperial';
+    const altVal = isImp ? altMeters * 3.28084 : altMeters;
+    const spdVal = isImp ? smoothedSpeedMps * 1.94384 : smoothedSpeedMps; // knots or m/s
+    const spdMax = isImp ? 160 : 80;
+
+    // Dual-hand barometric altimeter rotation:
+    // Long gold hand = 1 full revolution per 1,000 units; short silver hand = 1 revolution per 10,000 units
+    const alt100Deg = ((altVal % 1000) / 1000) * 360;
+    const alt1000Deg = ((altVal % 10000) / 10000) * 360;
+
+    const altNeedle100 = el<HTMLElement>('gauge-alt-needle-100');
+    const altNeedle1000 = el<HTMLElement>('gauge-alt-needle-1000');
+    if (altNeedle100) altNeedle100.style.transform = `rotate(${alt100Deg.toFixed(1)}deg)`;
+    if (altNeedle1000) altNeedle1000.style.transform = `rotate(${alt1000Deg.toFixed(1)}deg)`;
+
+    // Altimeter digital drum readout
+    const altReadoutEl = el<HTMLSpanElement>('gauge-alt-readout');
+    const altUnitEl = el<HTMLSpanElement>('gauge-alt-unit');
+    if (altReadoutEl && altUnitEl) {
+      if (isImp) {
+        if (altVal >= 100000) {
+          altReadoutEl.textContent = `${(altVal / 1000).toFixed(0)}k`;
+          altUnitEl.textContent = 'FT';
+        } else if (altVal >= 10000) {
+          altReadoutEl.textContent = `${(altVal / 1000).toFixed(1)}k`;
+          altUnitEl.textContent = 'FT';
+        } else {
+          altReadoutEl.textContent = `${Math.round(altVal)}`;
+          altUnitEl.textContent = 'FT';
+        }
+      } else {
+        if (altVal >= 10000) {
+          altReadoutEl.textContent = `${(altVal / 1000).toFixed(1)}`;
+          altUnitEl.textContent = 'KM';
+        } else {
+          altReadoutEl.textContent = `${Math.round(altVal)}`;
+          altUnitEl.textContent = 'M';
+        }
+      }
+    }
+
+    // Climb / Descent vertical speed chevron
+    const vsiEl = el<HTMLSpanElement>('gauge-vsi-badge');
+    if (vsiEl) {
+      if (smoothedClimbMps > 0.6) {
+        vsiEl.textContent = '▲';
+        vsiEl.className = 'text-[8px] font-mono text-emerald-400 leading-none';
+      } else if (smoothedClimbMps < -0.6) {
+        vsiEl.textContent = '▼';
+        vsiEl.className = 'text-[8px] font-mono text-red-400 leading-none';
+      } else {
+        vsiEl.textContent = '·';
+        vsiEl.className = 'text-[8px] font-mono text-slate-500 leading-none';
+      }
+    }
+
+    // Airspeed needle: -135° (0) to +135° (max), clamped gracefully at redline
+    const spdRatio = Math.max(0, Math.min(1, spdVal / spdMax));
+    const spdDeg = -135 + spdRatio * 270;
+    const spdNeedle = el<HTMLElement>('gauge-spd-needle');
+    if (spdNeedle) spdNeedle.style.transform = `rotate(${spdDeg.toFixed(1)}deg)`;
+
+    const spdReadoutEl = el<HTMLSpanElement>('gauge-spd-readout');
+    if (spdReadoutEl) {
+      spdReadoutEl.textContent = spdVal >= 999 ? '999+' : `${Math.round(spdVal)}`;
+    }
+
+    const spdModeEl = el<HTMLElement>('gauge-spd-mode');
+    if (spdModeEl) {
+      const modeCode =
+        flightMode === 'wasd'
+          ? 'WASD'
+          : flightMode === 'orbit'
+            ? 'ORB'
+            : flightMode === 'tour'
+              ? 'TOUR'
+              : smoothedSpeedMps > 0.5
+                ? 'FLY'
+                : 'HVR';
+      spdModeEl.textContent = modeCode;
+    }
+  }
+
   function setupUI(): void {
     renderTilesetList();
     renderBookmarkList();
     renderClipList();
-    setPanelTab(activeTab);
 
     // WebGL Reload Fallback
     el<HTMLButtonElement>('btn-reload-webgl')?.addEventListener('click', () => {
       window.location.reload();
-    });
-
-    // Panel Tabs
-    document.querySelectorAll<HTMLButtonElement>('.panel-tab-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const tab = btn.dataset.panelTab as PanelTab;
-        if (tab) setPanelTab(tab);
-      });
     });
 
     // Token Modal Controls
@@ -3391,9 +3497,7 @@ let cameraPathRemove: (() => void) | null = null;
     btnToggle3DWeather?.addEventListener('click', () => {
       show3DWeatherOverlay = !show3DWeatherOverlay;
       btnToggle3DWeather.textContent = show3DWeatherOverlay ? '3D Wind: On' : '3D Wind: Off';
-      btnToggle3DWeather.className = show3DWeatherOverlay
-        ? 'text-[11px] font-mono text-sky-300 hover:text-sky-200 transition-colors cursor-pointer'
-        : 'text-[11px] font-mono text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer';
+      btnToggle3DWeather.setAttribute('data-active', String(show3DWeatherOverlay));
       if (show3DWeatherOverlay && lastWeatherData) {
         render3DWeatherOverlay(lastWeatherData);
       } else {
@@ -3421,12 +3525,6 @@ let cameraPathRemove: (() => void) | null = null;
       }
       fetchAndRenderSiteWeather(lastWeatherLat, lastWeatherLon, false);
     });
-
-    const toggleWeatherHud = () => {
-      setWeatherHudVisible(!weatherVisible);
-    };
-    el<HTMLButtonElement>('btn-toggle-weather')?.addEventListener('click', toggleWeatherHud);
-    el<HTMLButtonElement>('btn-close-weather')?.addEventListener('click', toggleWeatherHud);
 
     // Clipping Polygon GeoJSON Controls
     const inputClipAssetId = el<HTMLInputElement>('input-clip-asset-id');
@@ -3480,6 +3578,7 @@ let cameraPathRemove: (() => void) | null = null;
         if (lonInput) lonInput.value = String(lon);
         if (altInput) altInput.value = String(alt);
         flyToWGS84(lat, lon, alt, pitch);
+        setActiveCard(null);
       });
     });
 
@@ -3511,19 +3610,19 @@ let cameraPathRemove: (() => void) | null = null;
       });
     });
 
-    // Video Recording & Snapshot Controls
+    // Video Recording & Snapshot Controls (auto-tuck capture card when live recording begins)
     el<HTMLButtonElement>('btn-rec-free')?.addEventListener('click', () => {
-      if (isRecording) stopRecording();
-      else startRecording(flightMode === 'wasd' ? 'WASD Pilot' : 'Free Flight');
+      if (isRecording) {
+        stopRecording();
+      } else if (startRecording(flightMode === 'wasd' ? 'WASD Pilot' : 'Free Flight')) {
+        setActiveCard(null);
+      }
     });
     el<HTMLButtonElement>('btn-rec-orbit')?.addEventListener('click', () => {
-      startRecord360Lap();
+      const res = startRecord360Lap();
+      if (res.ok) setActiveCard(null);
     });
     el<HTMLButtonElement>('btn-snapshot-png')?.addEventListener('click', capturePngSnapshot);
-    el<HTMLButtonElement>('btn-quick-record')?.addEventListener('click', () => {
-      if (isRecording) stopRecording();
-      else startRecording(flightMode === 'orbit' ? '360° Orbit' : 'Aerial Capture');
-    });
     el<HTMLButtonElement>('btn-stop-rec-banner')?.addEventListener('click', stopRecording);
 
     // Offline Render Path Controls
@@ -3649,16 +3748,10 @@ let cameraPathRemove: (() => void) | null = null;
           if (activeFlySeq === seq) pendingCameraTarget = null;
         },
       });
+      setActiveCard(null);
     });
 
-    // Telemetry toggle (Controls toggle is wired synchronously on boot)
-    const toggleHealth = () => {
-      setHealthPanelVisible(!healthVisible);
-    };
-    el<HTMLButtonElement>('btn-toggle-health')?.addEventListener('click', toggleHealth);
-    el<HTMLButtonElement>('btn-close-health')?.addEventListener('click', toggleHealth);
-
-    // Keyboard Listeners for WASD Pilot & Escape
+    // Keyboard Listeners for WASD Pilot, Escape Auto-Tuck & Zen Mode (H)
     window.addEventListener('keydown', (e) => {
       const target = e.target as HTMLElement | null;
       const isTyping =
@@ -3667,16 +3760,24 @@ let cameraPathRemove: (() => void) | null = null;
       if (isTyping) return;
 
       if (e.key === 'Escape') {
+        clearSpotlight();
+        const modalWasOpen =
+          (tokenModal && !tokenModal.classList.contains('hidden')) ||
+          (clipModal && !clipModal.classList.contains('hidden'));
+        const modeWasActive = flightMode !== 'explore' || measureMode !== 'off';
         if (flightMode !== 'explore') setFlightMode('explore');
         if (measureMode !== 'off') setMeasureMode('off');
         closeTokenModal();
         closeClipModal();
+        if (!modalWasOpen && !modeWasActive && (activeCard !== null || hudMode === 'summon')) {
+          setActiveCard(null);
+        }
         return;
       }
 
       if ((e.key === 'h' || e.key === 'H') && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
-        setHudTucked(!hudTucked);
+        setHudTucked(hudMode !== 'zen');
         return;
       }
 
@@ -3714,94 +3815,355 @@ let cameraPathRemove: (() => void) | null = null;
     });
   }
 
-  let hudTucked = false;
-  let tuckedSnapshot = {
-    weather: weatherVisible,
-    health: healthVisible,
-    panel: false,
-    copilot: false,
+  const ALL_CARDS: Array<Exclude<ActiveCard, null>> = [
+    'world',
+    'flight',
+    'capture',
+    'site',
+    'weather',
+    'telemetry',
+  ];
+
+  // Declarative Control-to-Card Registry for Co-Pilot Real-Time UI Awareness & Spotlighting
+  const CONTROL_CARD_MAP: Record<string, Exclude<ActiveCard, null>> = {
+    'btn-load-redmond': 'world',
+    'input-asset-id': 'world',
+    'btn-load-asset': 'world',
+    'btn-toggle-terrain': 'world',
+    'btn-toggle-google3d': 'world',
+    'input-clip-asset-id': 'world',
+    'btn-apply-clip': 'world',
+    'btn-clear-clip': 'world',
+    'slider-sse': 'world',
+    'slider-height-offset': 'world',
+    'input-address-search': 'world',
+    'btn-address-search': 'world',
+    'btn-fly-coords': 'world',
+    'btn-home': 'flight',
+    'slider-flight-speed': 'flight',
+    'slider-orbit-speed': 'flight',
+    'btn-rec-free': 'capture',
+    'btn-rec-orbit': 'capture',
+    'btn-snapshot-png': 'capture',
+    'btn-load-render-path': 'capture',
+    'btn-render-frames': 'capture',
+    'btn-render-to-folder': 'capture',
+    'input-site-title': 'site',
+    'input-source-crs': 'site',
+    'btn-load-manifest': 'site',
+    'btn-export-manifest': 'site',
+    'btn-copy-manifest': 'site',
+    'input-bookmark-name': 'site',
+    'btn-save-bookmark': 'site',
+    'btn-measure-distance': 'site',
+    'btn-measure-area': 'site',
+    'btn-measure-clear': 'site',
+    'btn-weather-units': 'weather',
+    'btn-weather-refresh': 'weather',
+    'btn-toggle-3d-weather': 'weather',
+    'slider-weather-opacity': 'weather',
   };
 
-  function setControlPanelVisible(visible: boolean): void {
-    panelVisible = visible;
-    if (controlPanel) {
-      controlPanel.setAttribute('data-tucked', visible ? 'false' : 'true');
-      controlPanel.setAttribute('aria-hidden', String(!visible));
+  let zenSnapshot: {
+    activeCard: ActiveCard;
+    hudMode: 'rail' | 'summon';
+    copilotOpen: boolean;
+  } = {
+    activeCard: null,
+    hudMode: 'rail',
+    copilotOpen: false,
+  };
+
+  function clearSpotlight(): void {
+    if (spotlightTimer !== null) {
+      window.clearTimeout(spotlightTimer);
+      spotlightTimer = null;
     }
-    const toggleBtn = el<HTMLButtonElement>('btn-toggle-panel');
-    if (toggleBtn) {
-      toggleBtn.className = visible
-        ? 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.15] text-white border border-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] cursor-pointer whitespace-nowrap shrink-0'
-        : 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-300/90 hover:text-white hover:bg-white/[0.08] border border-transparent cursor-pointer whitespace-nowrap shrink-0';
+    if (spotlightCleanup) {
+      spotlightCleanup();
+      spotlightCleanup = null;
+    }
+    if (spotlightTag) {
+      spotlightTag.classList.add('hidden');
+      spotlightTag.textContent = '';
     }
   }
 
-  function setHealthPanelVisible(visible: boolean): void {
-    healthVisible = visible;
-    if (healthPanel) {
-      healthPanel.setAttribute('data-tucked', visible ? 'false' : 'true');
-      healthPanel.setAttribute('aria-hidden', String(!visible));
+  function highlightControl(controlId: string, note?: string): { ok: boolean; controlId: string; card?: string; error?: string } {
+    clearSpotlight();
+    const id = controlId.trim();
+    if (!id) return { ok: false, controlId: id, error: 'controlId is required.' };
+
+    if (hudMode === 'zen') {
+      setHudTucked(false);
     }
-    const toggleBtn = el<HTMLButtonElement>('btn-toggle-health');
-    if (toggleBtn) {
-      toggleBtn.className = visible
-        ? 'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/20 text-emerald-200 border border-emerald-400/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] cursor-pointer whitespace-nowrap shrink-0'
-        : 'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-300/90 hover:text-white hover:bg-white/[0.08] border border-transparent cursor-pointer whitespace-nowrap shrink-0';
+
+    const parentCard = CONTROL_CARD_MAP[id];
+    if (parentCard && activeCard !== parentCard) {
+      setActiveCard(parentCard);
+    }
+
+    const target = el<HTMLElement>(id);
+    if (!target) {
+      return { ok: false, controlId: id, error: `Control "#${id}" not found in HUD.` };
+    }
+
+    const applyHighlight = () => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      target.classList.add('copilot-spotlight');
+
+      if (spotlightTag) {
+        const rect = target.getBoundingClientRect();
+        const tagText = (note || '').trim() || target.textContent?.trim() || id;
+        spotlightTag.textContent = tagText;
+        spotlightTag.classList.remove('hidden');
+        const tagW = spotlightTag.offsetWidth || 120;
+        const left = Math.max(12, Math.min(window.innerWidth - tagW - 12, rect.left + rect.width / 2 - tagW / 2));
+        const top = Math.max(12, rect.top - 32);
+        spotlightTag.style.left = `${Math.round(left)}px`;
+        spotlightTag.style.top = `${Math.round(top)}px`;
+      }
+
+      const onInteract = () => clearSpotlight();
+      target.addEventListener('click', onInteract, { once: true });
+      spotlightCleanup = () => {
+        target.classList.remove('copilot-spotlight');
+        target.removeEventListener('click', onInteract);
+      };
+      spotlightTimer = window.setTimeout(clearSpotlight, 6000);
+    };
+
+    window.setTimeout(applyHighlight, parentCard ? 250 : 30);
+    return { ok: true, controlId: id, card: parentCard || activeCard || 'rail' };
+  }
+
+  function notifyUiStateChanged(): void {
+    try {
+      controller.onUiStateChange?.(getContextSnapshot());
+    } catch {
+      // ignore
     }
   }
 
-  function setWeatherHudVisible(visible: boolean): void {
-    weatherVisible = visible;
-    if (weatherHud) {
-      weatherHud.setAttribute('data-tucked', visible ? 'false' : 'true');
-      weatherHud.setAttribute('aria-hidden', String(!visible));
+  function updateRailActiveButtons(): void {
+    document.querySelectorAll<HTMLButtonElement>('[data-rail-card]').forEach((btn) => {
+      const card = btn.dataset.railCard as Exclude<ActiveCard, null>;
+      btn.setAttribute('data-active', String(hudMode === 'rail' && activeCard === card));
+    });
+    const summonBtn = el<HTMLButtonElement>('btn-summon-all');
+    if (summonBtn) {
+      summonBtn.setAttribute('data-active', String(hudMode === 'summon'));
     }
-    const toggleBtn = el<HTMLButtonElement>('btn-toggle-weather');
-    if (toggleBtn) {
-      toggleBtn.className = visible
-        ? 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-sky-500/20 text-sky-200 border border-sky-400/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] cursor-pointer whitespace-nowrap shrink-0'
-        : 'glass-btn px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-300/90 hover:text-white hover:bg-white/[0.08] border border-transparent cursor-pointer whitespace-nowrap shrink-0';
+  }
+
+  function setActiveCard(card: ActiveCard): void {
+    if (hudMode === 'zen' && card !== null) {
+      setHudTucked(false);
     }
+
+    // Close Summon-All grid whenever isolating or tucking a single card
+    if (summonGrid) {
+      summonGrid.setAttribute('data-tucked', 'true');
+      summonGrid.setAttribute('aria-hidden', 'true');
+    }
+
+    hudMode = 'rail';
+    activeCard = card;
+
+    ALL_CARDS.forEach((c) => {
+      const node = el<HTMLElement>(`card-${c}`);
+      if (!node) return;
+      if (c === card) {
+        node.classList.remove('hidden');
+        requestAnimationFrame(() => {
+          if (activeCard === c && hudMode === 'rail') {
+            node.setAttribute('data-tucked', 'false');
+            node.setAttribute('aria-hidden', 'false');
+          }
+        });
+      } else {
+        node.setAttribute('data-tucked', 'true');
+        node.setAttribute('aria-hidden', 'true');
+        window.setTimeout(() => {
+          if (activeCard !== c) {
+            node.classList.add('hidden');
+          }
+        }, 190);
+      }
+    });
+
+    updateRailActiveButtons();
+    notifyUiStateChanged();
+  }
+
+  function toggleSummonAll(): void {
+    if (hudMode === 'zen') {
+      setHudTucked(false);
+    }
+    if (hudMode === 'summon') {
+      setActiveCard(null);
+      return;
+    }
+
+    // Tuck any currently open single card cleanly
+    ALL_CARDS.forEach((c) => {
+      const node = el<HTMLElement>(`card-${c}`);
+      if (!node) return;
+      node.setAttribute('data-tucked', 'true');
+      node.setAttribute('aria-hidden', 'true');
+      window.setTimeout(() => {
+        if (activeCard !== c) node.classList.add('hidden');
+      }, 190);
+    });
+
+    activeCard = null;
+    hudMode = 'summon';
+    if (summonGrid) {
+      summonGrid.setAttribute('data-tucked', 'false');
+      summonGrid.setAttribute('aria-hidden', 'false');
+    }
+
+    updateRailActiveButtons();
+    notifyUiStateChanged();
   }
 
   function setHudTucked(tucked: boolean): void {
-    if (hudTucked === tucked) return;
-    hudTucked = tucked;
+    const isCurrentlyZen = hudMode === 'zen';
+    if (isCurrentlyZen === tucked) return;
 
     const headerEl = document.querySelector('header') as HTMLElement | null;
     const dockEl = el<HTMLElement>('hud-dock');
     const recallBtn = el<HTMLButtonElement>('btn-recall-hud');
 
     if (tucked) {
-      tuckedSnapshot = {
-        weather: weatherVisible,
-        health: healthVisible,
-        panel: panelVisible,
-        copilot: controller.isCopilotDrawerVisible?.() ?? false,
+      clearSpotlight();
+      zenSnapshot = {
+        activeCard,
+        hudMode: hudMode === 'summon' ? 'summon' : 'rail',
+        copilotOpen: controller.isCopilotDrawerVisible?.() ?? false,
       };
-      setWeatherHudVisible(false);
-      setHealthPanelVisible(false);
-      setControlPanelVisible(false);
+      hudMode = 'zen';
+
+      ALL_CARDS.forEach((c) => {
+        const node = el<HTMLElement>(`card-${c}`);
+        if (!node) return;
+        node.setAttribute('data-tucked', 'true');
+        node.setAttribute('aria-hidden', 'true');
+      });
+      if (summonGrid) {
+        summonGrid.setAttribute('data-tucked', 'true');
+        summonGrid.setAttribute('aria-hidden', 'true');
+      }
       controller.setCopilotDrawerVisible?.(false);
 
       headerEl?.setAttribute('data-tucked', 'true');
+      flightClusterGauge?.setAttribute('data-tucked', 'true');
+      flightClusterGauge?.setAttribute('aria-hidden', 'true');
       dockEl?.setAttribute('data-tucked', 'true');
       recallBtn?.setAttribute('data-tucked', 'false');
       recallBtn?.setAttribute('aria-hidden', 'false');
+      notifyUiStateChanged();
     } else {
+      hudMode = 'rail';
       recallBtn?.setAttribute('data-tucked', 'true');
       recallBtn?.setAttribute('aria-hidden', 'true');
       headerEl?.setAttribute('data-tucked', 'false');
+      flightClusterGauge?.setAttribute('data-tucked', 'false');
+      flightClusterGauge?.setAttribute('aria-hidden', 'false');
       dockEl?.setAttribute('data-tucked', 'false');
 
-      if (tuckedSnapshot.weather) setWeatherHudVisible(true);
-      if (tuckedSnapshot.health) setHealthPanelVisible(true);
-      if (tuckedSnapshot.copilot) {
+      if (zenSnapshot.copilotOpen) {
         controller.setCopilotDrawerVisible?.(true);
-      } else if (tuckedSnapshot.panel) {
-        setControlPanelVisible(true);
+      }
+      if (zenSnapshot.hudMode === 'summon') {
+        toggleSummonAll();
+      } else {
+        setActiveCard(zenSnapshot.activeCard);
       }
     }
+  }
+
+  function getVisibleControlsSnapshot(): UiControlEntry[] {
+    const entries: UiControlEntry[] = [];
+    if (hudMode === 'zen') {
+      entries.push({ id: 'btn-recall-hud', label: 'Show HUD (H)', card: 'zen' });
+      return entries;
+    }
+
+    if (hudMode === 'summon') {
+      return [
+        { id: 'card-world', label: 'World (3DGS, Layers, LOD, Coords)', card: 'summon' },
+        { id: 'card-flight', label: 'Flight (WASD, Orbit, Speed, Lens)', card: 'summon' },
+        { id: 'card-capture', label: 'Capture (Record, 360°, Render Path)', card: 'summon' },
+        { id: 'card-site', label: 'Site (Manifest, Bookmarks, Measure)', card: 'summon' },
+      ];
+    }
+
+    if (activeCard === 'world') {
+      return [
+        { id: 'btn-load-redmond', label: '110M Splat Campus (#4547222)', card: 'world' },
+        { id: 'btn-toggle-terrain', label: 'World Terrain', card: 'world', active: worldTerrainEnabled },
+        { id: 'btn-toggle-google3d', label: 'Google 3D Tiles', card: 'world', active: google3DEnabled },
+        { id: 'btn-load-asset', label: 'Load Ion Asset ID', card: 'world' },
+        { id: 'btn-apply-clip', label: 'Clip GeoJSON', card: 'world', active: activeClipAssetId !== null },
+        { id: 'slider-sse', label: 'LOD SSE', card: 'world', value: `${currentSSE} px` },
+        { id: 'slider-height-offset', label: 'Height Nudge', card: 'world', value: `${currentHeightOffset} m` },
+        { id: 'btn-address-search', label: 'Find Address', card: 'world' },
+        { id: 'btn-fly-coords', label: 'Fly To Coordinates', card: 'world' },
+      ];
+    }
+    if (activeCard === 'flight') {
+      return [
+        { id: 'flight-mode-status', label: 'Flight Mode', card: 'flight', value: flightMode },
+        { id: 'slider-flight-speed', label: 'Airspeed', card: 'flight', value: `${wasdSpeedMps} m/s` },
+        { id: 'slider-orbit-speed', label: 'Orbit Rate', card: 'flight', value: `${orbitSpeedDegPerSec} deg/s` },
+        { id: 'val-lens-fov', label: '35mm Lens', card: 'flight', value: `${activeLensMm}mm` },
+        { id: 'btn-home', label: 'Reset Globe', card: 'flight' },
+      ];
+    }
+    if (activeCard === 'capture') {
+      return [
+        { id: 'btn-rec-free', label: isRecording ? 'Stop Recording' : 'Record Flight', card: 'capture', active: isRecording },
+        { id: 'btn-rec-orbit', label: '1-Lap 360° Clip', card: 'capture' },
+        { id: 'btn-snapshot-png', label: 'Snapshot PNG', card: 'capture' },
+        { id: 'btn-load-render-path', label: 'Load Render Path JSON', card: 'capture', value: loadedRenderPath ? `${loadedRenderPath.samples.length} frames` : 'none' },
+        { id: 'btn-render-frames', label: 'Render Frames (ZIP)', card: 'capture', disabled: !loadedRenderPath || isRenderingPath },
+        { id: 'btn-render-to-folder', label: 'Render to Folder', card: 'capture', disabled: !loadedRenderPath || isRenderingPath || !supportsDirectoryPicker },
+      ];
+    }
+    if (activeCard === 'site') {
+      return [
+        { id: 'btn-load-manifest', label: 'Load Manifest JSON', card: 'site' },
+        { id: 'btn-export-manifest', label: 'Export Manifest JSON', card: 'site' },
+        { id: 'btn-copy-manifest', label: 'Copy Manifest JSON', card: 'site' },
+        { id: 'btn-save-bookmark', label: 'Save Camera Bookmark', card: 'site', value: `${cameraBookmarks.length} saved` },
+        { id: 'btn-measure-distance', label: 'Measure Distance', card: 'site', active: measureMode === 'distance' },
+        { id: 'btn-measure-area', label: 'Measure Area', card: 'site', active: measureMode === 'area' },
+        { id: 'btn-measure-clear', label: 'Clear Measurement', card: 'site' },
+      ];
+    }
+    if (activeCard === 'weather') {
+      return [
+        { id: 'btn-weather-units', label: 'Temperature Units', card: 'weather', value: weatherUnits },
+        { id: 'btn-weather-refresh', label: 'Refresh Weather', card: 'weather' },
+        { id: 'btn-toggle-3d-weather', label: '3D Wind Vectors', card: 'weather', active: show3DWeatherOverlay },
+        { id: 'slider-weather-opacity', label: 'Weather Layer Opacity', card: 'weather', value: `${Math.round(weatherOpacity * 100)}%` },
+      ];
+    }
+    if (activeCard === 'telemetry') {
+      return [
+        { id: 'metric-fps', label: 'FPS', card: 'telemetry', value: `${Math.round(smoothedFps)}` },
+        { id: 'metric-tilesets', label: 'Loaded Tilesets', card: 'telemetry', value: `${activeTilesets.length}` },
+      ];
+    }
+
+    // No card open: bottom command rail + ion token pill are visible
+    return [
+      { id: 'btn-open-token', label: 'ion Token', card: 'header', active: ionConnected },
+      { id: 'btn-summon-all', label: 'Summon All Cards', card: 'rail' },
+      { id: 'btn-toggle-copilot', label: 'Co-Pilot', card: 'rail', active: controller.isCopilotDrawerVisible?.() ?? false },
+      { id: 'btn-tuck-hud', label: 'Zen Mode (H)', card: 'rail' },
+    ];
   }
 
   function getCameraState(): CameraState | null {
@@ -3821,6 +4183,12 @@ let cameraPathRemove: (() => void) | null = null;
   }
 
   function getContextSnapshot(): CopilotContextSnapshot {
+    const uiState: UiStateSnapshot = {
+      hudMode,
+      activeCard,
+      copilotOpen: controller.isCopilotDrawerVisible?.() ?? false,
+      visibleControls: getVisibleControlsSnapshot(),
+    };
     return {
       camera: getCameraState(),
       loadedTilesets: activeTilesets.map((t) => ({
@@ -3854,6 +4222,7 @@ let cameraPathRemove: (() => void) | null = null;
             updatedAt: lastWeatherData.updatedAt,
           }
         : null,
+      uiState,
     };
   }
 
@@ -4145,6 +4514,51 @@ let cameraPathRemove: (() => void) | null = null;
           };
         }
 
+        case 'openPanel': {
+          const panel = String(args.panel || '').toLowerCase();
+          if (panel === 'summon') {
+            toggleSummonAll();
+            return { ok: true, panel: 'summon', activeCard: null };
+          }
+          if (panel === 'none' || panel === 'close') {
+            setActiveCard(null);
+            return { ok: true, panel: 'none', activeCard: null };
+          }
+          if (ALL_CARDS.includes(panel as Exclude<ActiveCard, null>)) {
+            setActiveCard(panel as Exclude<ActiveCard, null>);
+            return { ok: true, panel, activeCard: panel };
+          }
+          return { ok: false, error: `Unknown panel "${panel}".` };
+        }
+
+        case 'highlightControl': {
+          const controlId = String(args.controlId || '');
+          const note = typeof args.note === 'string' ? args.note : undefined;
+          return highlightControl(controlId, note);
+        }
+
+        case 'webSearch': {
+          const query = String(args.query || '').trim();
+          if (!query) return { ok: false, error: 'Search query is required.' };
+          const res = await fetch('/api/copilot/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data?.ok) {
+            return { ok: false, query, error: data?.error || `Web search HTTP ${res.status}` };
+          }
+          logEvent(`Co-Pilot web search: "${query}" (${data.sources?.length ?? 0} sources).`, 'info');
+          return {
+            ok: true,
+            query: data.query || query,
+            summary: data.summary || '',
+            sources: Array.isArray(data.sources) ? data.sources : [],
+            engine: data.engine || 'google-search',
+          };
+        }
+
         default:
           return { ok: false, error: `Unknown tool "${name}".` };
       }
@@ -4157,39 +4571,88 @@ let cameraPathRemove: (() => void) | null = null;
     getContextSnapshot,
     executeTool,
     hideControlPanel: () => {
-      setControlPanelVisible(false);
+      setActiveCard(null);
     },
   };
 
-  // Wire Controls toggle synchronously so dock clicks work immediately on load
-  const handleToggleControlPanel = (e?: Event) => {
-    e?.preventDefault();
-    e?.stopPropagation();
-    const nextVisible = !panelVisible;
-    setControlPanelVisible(nextVisible);
-    controller.onControlPanelToggle?.(nextVisible);
-  };
-  el<HTMLButtonElement>('btn-toggle-panel')?.addEventListener('click', handleToggleControlPanel);
-  el<HTMLButtonElement>('btn-close-panel')?.addEventListener('click', (e) => {
+  // Wire Bottom Command Rail, Summon-All, Card Done, and Zen Mode synchronously on boot
+  document.querySelectorAll<HTMLButtonElement>('[data-rail-card]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const card = btn.dataset.railCard as Exclude<ActiveCard, null>;
+      if (!card) return;
+      if (hudMode === 'rail' && activeCard === card) {
+        setActiveCard(null);
+      } else {
+        setActiveCard(card);
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-summon-card]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const card = btn.dataset.summonCard as Exclude<ActiveCard, null>;
+      if (card) setActiveCard(card);
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-card-done]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setActiveCard(null);
+    });
+  });
+
+  el<HTMLButtonElement>('btn-summon-all')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    setControlPanelVisible(false);
-    controller.onControlPanelToggle?.(false);
+    toggleSummonAll();
   });
+
   el<HTMLButtonElement>('btn-tuck-hud')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
     setHudTucked(true);
   });
+
   el<HTMLButtonElement>('btn-recall-hud')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
     setHudTucked(false);
   });
 
-  setControlPanelVisible(false);
-  setHealthPanelVisible(healthVisible);
-  setWeatherHudVisible(weatherVisible);
+  // Chronograph Altimeter + Airspeedometer Cluster Gauge Controls
+  applyClusterUnitLabels();
+  el<HTMLButtonElement>('btn-cluster-units')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    clusterUnits = clusterUnits === 'imperial' ? 'metric' : 'imperial';
+    applyClusterUnitLabels();
+    lastClusterSampleMs = 0;
+    updateFlightClusterGauge(performance.now());
+  });
+  el<HTMLButtonElement>('btn-toggle-cluster')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    clusterCollapsed = !clusterCollapsed;
+    const body = el<HTMLDivElement>('cluster-dials-body');
+    const btn = el<HTMLButtonElement>('btn-toggle-cluster');
+    const hdr = flightClusterGauge?.querySelector('div:first-child') as HTMLElement | null;
+    if (body) body.classList.toggle('hidden', clusterCollapsed);
+    if (btn) btn.textContent = clusterCollapsed ? '+' : '−';
+    if (hdr) {
+      hdr.classList.toggle('border-b', !clusterCollapsed);
+      hdr.classList.toggle('pb-1.5', !clusterCollapsed);
+      hdr.classList.toggle('mb-2', !clusterCollapsed);
+    }
+  });
+
+  // Clean unobstructed 3D globe on initial launch (no cards open; bottom rail + top-left brand pill + cluster gauge)
+  setActiveCard(null);
   initCesium();
   return controller;
 }

@@ -1,16 +1,12 @@
-import {
-  Content,
-  FunctionDeclaration,
-  ThinkingLevel,
-  Type,
-} from '@google/genai';
-import { getGeminiClient } from './geminiService.js';
+import { ThinkingLevel, Type } from '@google/genai';
+import type { Content, FunctionDeclaration } from '@google/genai';
+import { getGeminiClient } from './geminiService.ts';
 
 export const COPILOT_FLASH_MODEL = 'gemini-4-hydrogen';
 export const COPILOT_LIVE_MODEL = 'gemini-3.8-live';
 
 export const COPILOT_SYSTEM_INSTRUCTION =
-  'You are the NoDRONE Co-Pilot. You operate the viewer directly with your tools. When Joe asks for something, do it with a tool call, then confirm in one short sentence. Heights are metres above the WGS84 ellipsoid. Angles in degrees. Never invent asset IDs; ask if unknown. Before recording, check getWeather and mention any wind advisory. Site manifest keys: schemaVersion, siteId, title, exportedAt, geodesy{sourceCRS, convertedBy, wgs84Origin{lat,lon,ellipsoidalHeight}, verticalOffsetMeters}, layers{worldTerrain, google3DTiles, defaultSSE, clippingGeoJsonAssetId}, tilesets[{name, ionAssetId, type, visible, clippingGeoJsonAssetId}], bookmarks[{name,lat,lon,alt,heading,pitch,roll}]. In voice, keep replies to 1-2 sentences and never read JSON aloud.';
+  'You are the NoDRONE Co-Pilot. You operate the viewer directly with your tools, can guide Joe visually across the chronograph HUD, and can perform live web research using webSearch (or Google Search grounding) for real-time facts, FAA/airspace regulations, site history, landmarks, coordinates, specs, or current events. LIVE VIEWER CONTEXT includes uiState (activeCard, hudMode, visibleControls) showing what panel and buttons are currently on screen. When Joe asks how to do something, where a button is, or asks to open a panel, use openPanel and highlightControl (with exact controlId from visibleControls or known IDs) to spotlight it in gold in real time. When Joe asks to research something or look up current facts, call webSearch and give a crisp, accurate summary (sources appear automatically as links). When Joe asks to perform a viewer action, execute the tool directly and confirm in one short sentence. Heights are metres above the WGS84 ellipsoid. Angles in degrees. Never invent asset IDs; ask if unknown. Before recording, check getWeather and mention any wind advisory. Site manifest keys: schemaVersion, siteId, title, exportedAt, geodesy{sourceCRS, convertedBy, wgs84Origin{lat,lon,ellipsoidalHeight}, verticalOffsetMeters}, layers{worldTerrain, google3DTiles, defaultSSE, clippingGeoJsonAssetId}, tilesets[{name, ionAssetId, type, visible, clippingGeoJsonAssetId}], bookmarks[{name,lat,lon,alt,heading,pitch,roll}]. In voice, keep replies to 1-2 sentences and never read JSON or URLs aloud.';
 
 export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
@@ -299,6 +295,58 @@ export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
       required: ['json'],
     },
   },
+  {
+    name: 'openPanel',
+    description:
+      'Open, switch, fan out, or tuck the bottom chronograph command card so Joe can see the relevant buttons while Co-Pilot stays open.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        panel: {
+          type: Type.STRING,
+          enum: ['world', 'flight', 'capture', 'site', 'weather', 'telemetry', 'summon', 'none'],
+          description:
+            'Card to display above the bottom command rail ("world", "flight", "capture", "site", "weather", "telemetry"), "summon" for the 2x2 overview cluster, or "none" to tuck all cards.',
+        },
+      },
+      required: ['panel'],
+    },
+  },
+  {
+    name: 'highlightControl',
+    description:
+      'Spotlight a specific button or control on screen with a champagne-gold pulse halo and optional short callout note. Automatically opens its parent card if needed.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        controlId: {
+          type: Type.STRING,
+          description:
+            'Exact DOM ID of the button/control (e.g. "btn-load-redmond", "btn-toggle-google3d", "btn-rec-orbit", "btn-load-render-path", "btn-render-frames", "btn-export-manifest", "btn-measure-distance", "btn-weather-refresh", "btn-open-token", "btn-cluster-units").',
+        },
+        note: {
+          type: Type.STRING,
+          description: 'Optional 2-5 word guidance tag displayed next to the spotlighted button.',
+        },
+      },
+      required: ['controlId'],
+    },
+  },
+  {
+    name: 'webSearch',
+    description:
+      'Search the live web for real-time research: site facts, FAA Part 107 / drone airspace rules, landmark coordinates, photogrammetry/3DGS tools, local news, or general questions. Returns a grounded summary and clickable web source links.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        query: {
+          type: Type.STRING,
+          description: 'Focused web search query to research.',
+        },
+      },
+      required: ['query'],
+    },
+  },
 ];
 
 export function buildSystemInstructionWithContext(context?: Record<string, unknown> | null): string {
@@ -315,6 +363,20 @@ export const DEFAULT_NOUS_MODEL = 'google/gemini-4-hydrogen';
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-5';
 export const GEMINI_FALLBACK_FLASH_MODEL = 'gemini-2.5-flash';
 
+export interface WebSearchSource {
+  title: string;
+  uri: string;
+}
+
+export interface WebSearchResult {
+  ok: boolean;
+  query: string;
+  summary: string;
+  sources: WebSearchSource[];
+  engine: string;
+  error?: string;
+}
+
 export interface CopilotTurnResult {
   text: string;
   functionCalls: Array<{
@@ -325,6 +387,161 @@ export interface CopilotTurnResult {
   modelContent: Content | null;
   model: string;
   provider?: CopilotProviderId;
+  sources?: WebSearchSource[];
+}
+
+function extractGroundingSources(response: any): WebSearchSource[] {
+  const chunks = response?.candidates?.[0]?.groundingMetadata?.groundingChunks;
+  if (!Array.isArray(chunks)) return [];
+  const seen = new Set<string>();
+  const sources: WebSearchSource[] = [];
+  for (const chunk of chunks) {
+    const uri = typeof chunk?.web?.uri === 'string' ? chunk.web.uri.trim() : '';
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+    const title =
+      typeof chunk?.web?.title === 'string' && chunk.web.title.trim()
+        ? chunk.web.title.trim()
+        : uri.replace(/^https?:\/\//i, '').split('/')[0] || 'Source';
+    sources.push({ title, uri });
+    if (sources.length >= 6) break;
+  }
+  return sources;
+}
+
+export async function runWebSearch(rawQuery: string): Promise<WebSearchResult> {
+  const query = String(rawQuery || '').trim();
+  if (!query) {
+    return {
+      ok: false,
+      query: '',
+      summary: '',
+      sources: [],
+      engine: 'none',
+      error: 'Search query is required.',
+    };
+  }
+
+  // Primary: Gemini Live Google Search Grounding (server-side @google/genai)
+  const client = getGeminiClient();
+  if (client) {
+    const modelsToTry = [COPILOT_FLASH_MODEL, GEMINI_FALLBACK_FLASH_MODEL];
+    for (const modelName of modelsToTry) {
+      try {
+        const config: Record<string, unknown> = {
+          systemInstruction:
+            'You are a concise live web research engine for an aerial 3D geospatial pilot. Answer factually using Google Search results in 2-4 concise sentences with specific numbers, dates, or coordinates when relevant.',
+          tools: [{ googleSearch: {} }],
+        };
+        if (modelName === COPILOT_FLASH_MODEL) {
+          config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+        const response = await client.models.generateContent({
+          model: modelName,
+          contents: query,
+          config,
+        });
+        const summary = (response.text ?? '').trim();
+        const sources = extractGroundingSources(response);
+        if (summary || sources.length > 0) {
+          return {
+            ok: true,
+            query,
+            summary: summary || 'Retrieved grounded web sources.',
+            sources,
+            engine: `google-search:${modelName}`,
+          };
+        }
+      } catch (err: any) {
+        const msg = String(err?.message || '');
+        console.warn(`Gemini Google Search grounding error (${modelName}):`, msg);
+        if (modelName !== GEMINI_FALLBACK_FLASH_MODEL) {
+          continue;
+        }
+        break;
+      }
+    }
+  }
+
+  // Fallback: Live Wikipedia OpenSearch + DuckDuckGo Instant Answer API (zero-key web lookup)
+  const sources: WebSearchSource[] = [];
+  const snippets: string[] = [];
+  const decodeEntities = (str: string) =>
+    str
+      .replace(/<[^>]+>/g, '')
+      .replace(/&quot;/g, '"')
+      .replace(/&#039;|&apos;/g, "'")
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  try {
+    const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=3&utf8=&format=json`;
+    const wikiRes = await fetch(wikiUrl, {
+      headers: { 'User-Agent': 'NoDRONE-CoPilot-Research/1.0' },
+      signal: AbortSignal.timeout(5500),
+    });
+    if (wikiRes.ok) {
+      const wData: any = await wikiRes.json();
+      const hits = Array.isArray(wData?.query?.search) ? wData.query.search : [];
+      for (const hit of hits) {
+        const title = String(hit.title || '').trim();
+        const cleanSnippet = decodeEntities(String(hit.snippet || ''));
+        if (title) {
+          sources.push({
+            title: `${title} — Wikipedia`,
+            uri: `https://en.wikipedia.org/wiki/${encodeURIComponent(title.replace(/\s+/g, '_'))}`,
+          });
+          if (cleanSnippet) snippets.push(`${title}: ${cleanSnippet}`);
+        }
+      }
+    }
+  } catch {
+    // ignore wikipedia fallback error
+  }
+
+  try {
+    const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+    const ddgRes = await fetch(ddgUrl, {
+      headers: { 'User-Agent': 'NoDRONE-CoPilot-Research/1.0' },
+      signal: AbortSignal.timeout(4500),
+    });
+    if (ddgRes.ok) {
+      const dData: any = await ddgRes.json();
+      if (typeof dData?.AbstractText === 'string' && dData.AbstractText.trim()) {
+        snippets.unshift(dData.AbstractText.trim());
+        if (typeof dData?.AbstractURL === 'string' && dData.AbstractURL.trim()) {
+          sources.unshift({
+            title: String(dData.Heading || dData.AbstractSource || 'Web Reference'),
+            uri: dData.AbstractURL.trim(),
+          });
+        }
+      }
+    }
+  } catch {
+    // ignore ddg fallback error
+  }
+
+  if (snippets.length > 0 || sources.length > 0) {
+    return {
+      ok: true,
+      query,
+      summary: snippets.slice(0, 3).join(' · '),
+      sources: sources.slice(0, 5),
+      engine: 'web-fallback',
+    };
+  }
+
+  return {
+    ok: false,
+    query,
+    summary: '',
+    sources: [],
+    engine: 'none',
+    error: 'Live web search returned no results. Ensure GEMINI_API_KEY is active for full Google Search grounding.',
+  };
 }
 
 function mapGeminiTypeToJsonSchema(typeVal: unknown): string {
@@ -792,10 +1009,14 @@ async function runGeminiTurn(
       try {
         const config: Record<string, unknown> = {
           systemInstruction: buildSystemInstructionWithContext(context),
-          tools: [{ functionDeclarations: COPILOT_TOOL_DECLARATIONS }],
+          tools:
+            modelName === COPILOT_FLASH_MODEL
+              ? [{ googleSearch: {} }, { functionDeclarations: COPILOT_TOOL_DECLARATIONS }]
+              : [{ functionDeclarations: COPILOT_TOOL_DECLARATIONS }],
         };
         if (modelName === COPILOT_FLASH_MODEL) {
           config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+          config.toolConfig = { includeServerSideToolInvocations: true };
         }
         const response = await client.models.generateContent({
           model: modelName,
@@ -812,6 +1033,7 @@ async function runGeminiTurn(
             name: fc.name,
             args: (fc.args && typeof fc.args === 'object' ? fc.args : {}) as Record<string, unknown>,
           }));
+        const sources = extractGroundingSources(response);
 
         return {
           text: (response.text ?? '').trim(),
@@ -819,6 +1041,7 @@ async function runGeminiTurn(
           modelContent,
           model: modelName,
           provider: 'gemini',
+          ...(sources.length > 0 ? { sources } : {}),
         };
       } catch (err: any) {
         lastErr = err;

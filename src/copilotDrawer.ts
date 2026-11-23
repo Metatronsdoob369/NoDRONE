@@ -1,4 +1,4 @@
-import type { CopilotToolResult, NoDroneController } from './types';
+import type { CopilotToolResult, NoDroneController, WebSearchSource } from './types';
 
 interface ConversationContent {
   role: 'user' | 'model';
@@ -16,6 +16,7 @@ interface CopilotTurnResponse {
   functionCalls: TurnFunctionCall[];
   modelContent: ConversationContent | null;
   model: string;
+  sources?: WebSearchSource[];
   error?: string;
 }
 
@@ -67,6 +68,14 @@ function formatToolChipLabel(name: string, args: Record<string, unknown>): strin
       return `flyToBookmark ${String(args.name || '').trim()}`;
     case 'measure':
       return `measure ${args.mode ?? ''}`;
+    case 'openPanel':
+      return `panel ${String(args.panel ?? '')}`;
+    case 'highlightControl':
+      return `spotlight ${String(args.controlId ?? '')}`;
+    case 'webSearch': {
+      const q = String(args.query ?? '').trim();
+      return `search "${q.length > 26 ? `${q.slice(0, 25)}…` : q}"`;
+    }
     default:
       return name;
   }
@@ -182,8 +191,8 @@ export function initCopilotDrawer(controller: NoDroneController): void {
       drawer.setAttribute('data-tucked', visible ? 'false' : 'true');
       drawer.setAttribute('aria-hidden', String(!visible));
     }
+    document.body.setAttribute('data-copilot-open', String(visible));
     if (visible) {
-      controller.hideControlPanel();
       window.setTimeout(() => {
         if (drawerVisible) inputEl?.focus();
       }, 60);
@@ -193,13 +202,7 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
   function updateDockButtonStyle(): void {
     if (!toggleBtn) return;
-    if (drawerVisible) {
-      toggleBtn.className =
-        'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/30 text-white border border-indigo-400/45 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] cursor-pointer whitespace-nowrap shrink-0';
-    } else {
-      toggleBtn.className =
-        'glass-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium bg-indigo-500/12 text-indigo-200 border border-indigo-400/20 hover:bg-indigo-500/24 hover:text-white cursor-pointer whitespace-nowrap shrink-0';
-    }
+    toggleBtn.setAttribute('data-active', String(drawerVisible));
   }
 
   // Enforce clean tucked state on initial load
@@ -208,9 +211,19 @@ export function initCopilotDrawer(controller: NoDroneController): void {
   controller.isCopilotDrawerVisible = () => drawerVisible;
   controller.setCopilotDrawerVisible = (visible: boolean) => setDrawerVisible(visible);
 
-  controller.onControlPanelToggle = (controlPanelOpen: boolean) => {
-    if (controlPanelOpen && drawerVisible) {
-      setDrawerVisible(false);
+  // Push live UI state transitions silently into an active Gemini Live Voice session
+  controller.onUiStateChange = (snapshot) => {
+    if (liveActive && liveWs && liveWs.readyState === WebSocket.OPEN) {
+      try {
+        liveWs.send(
+          JSON.stringify({
+            type: 'uiContext',
+            context: snapshot,
+          })
+        );
+      } catch {
+        // ignore transient send error
+      }
     }
   };
 
@@ -221,7 +234,7 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
     const bubble = document.createElement('div');
     bubble.className =
-      'max-w-[85%] rounded-2xl rounded-br-md bg-indigo-600/25 border border-indigo-500/35 px-3 py-2 text-xs text-indigo-100 leading-relaxed whitespace-pre-wrap break-words';
+      'max-w-[85%] rounded-xl rounded-br-sm bg-[#d4af63]/16 border border-[#d4af63]/40 px-3 py-2 text-xs text-[#faf0d4] leading-relaxed whitespace-pre-wrap break-words';
     bubble.textContent = text;
     wrap.appendChild(bubble);
     messagesEl!.appendChild(wrap);
@@ -233,6 +246,7 @@ export function initCopilotDrawer(controller: NoDroneController): void {
     root: HTMLDivElement;
     chipsRow: HTMLDivElement;
     textBubble: HTMLDivElement;
+    sourcesRow: HTMLDivElement;
   } {
     hideEmptyState();
     const root = document.createElement('div');
@@ -243,12 +257,43 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
     const textBubble = document.createElement('div');
     textBubble.className =
-      'hidden max-w-[90%] rounded-2xl rounded-bl-md bg-zinc-950/85 border border-zinc-800 px-3 py-2 text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap break-words';
+      'hidden max-w-[90%] rounded-xl rounded-bl-sm bg-black/55 border border-white/10 px-3 py-2 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap break-words';
 
-    root.append(chipsRow, textBubble);
+    const sourcesRow = document.createElement('div');
+    sourcesRow.className = 'hidden flex-wrap gap-1 max-w-[95%] pt-0.5';
+
+    root.append(chipsRow, textBubble, sourcesRow);
     messagesEl!.appendChild(root);
     scrollToBottom();
-    return { root, chipsRow, textBubble };
+    return { root, chipsRow, textBubble, sourcesRow };
+  }
+
+  function appendSourcesToRow(sourcesRow: HTMLDivElement, sources: WebSearchSource[]): void {
+    if (!Array.isArray(sources) || sources.length === 0) return;
+    const existing = new Set(
+      Array.from(sourcesRow.querySelectorAll('a')).map((a) => a.href)
+    );
+    let added = false;
+    for (const src of sources) {
+      if (!src?.uri || !/^https?:\/\//i.test(src.uri)) continue;
+      if (existing.has(src.uri)) continue;
+      existing.add(src.uri);
+      const link = document.createElement('a');
+      link.href = src.uri;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.className =
+        'copilot-source-chip inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono max-w-[200px] truncate';
+      link.title = `${src.title || src.uri}\n${src.uri}`;
+      link.textContent = `↗ ${src.title || src.uri.replace(/^https?:\/\//i, '').split('/')[0]}`;
+      sourcesRow.appendChild(link);
+      added = true;
+    }
+    if (added) {
+      sourcesRow.classList.remove('hidden');
+      sourcesRow.classList.add('flex');
+      scrollToBottom();
+    }
   }
 
   function appendErrorBubble(message: string): void {
@@ -277,13 +322,13 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
     const chip = document.createElement('span');
     chip.className =
-      'inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-zinc-950/90 border border-zinc-700/80 text-[11px] font-mono text-zinc-300';
+      'inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/60 border border-white/15 text-[11px] font-mono text-slate-300';
 
     const labelSpan = document.createElement('span');
     labelSpan.textContent = formatToolChipLabel(name, args);
 
     const statusSpan = document.createElement('span');
-    statusSpan.className = 'text-indigo-400 animate-pulse';
+    statusSpan.className = 'text-[#e7cb88] animate-pulse';
     statusSpan.textContent = '…';
 
     chip.append(labelSpan, statusSpan);
@@ -295,12 +340,12 @@ export function initCopilotDrawer(controller: NoDroneController): void {
         chip.title = JSON.stringify(result);
         if (result.ok) {
           chip.className =
-            'inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-950/60 border border-emerald-500/35 text-[11px] font-mono text-emerald-200';
+            'inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-950/60 border border-emerald-400/35 text-[11px] font-mono text-emerald-200';
           statusSpan.className = 'text-emerald-400 font-semibold';
           statusSpan.textContent = '✓';
         } else {
           chip.className =
-            'inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-950/60 border border-amber-500/35 text-[11px] font-mono text-amber-200';
+            'inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-950/60 border border-amber-400/35 text-[11px] font-mono text-amber-200';
           statusSpan.className = 'text-amber-400 font-semibold';
           statusSpan.textContent = '!';
         }
@@ -344,6 +389,7 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
     try {
       let finalText = '';
+      const collectedSources: WebSearchSource[] = [];
 
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         const res = await fetch('/api/copilot/turn', {
@@ -360,6 +406,10 @@ export function initCopilotDrawer(controller: NoDroneController): void {
           throw new Error(data?.error || `HTTP ${res.status}`);
         }
 
+        if (Array.isArray(data.sources) && data.sources.length > 0) {
+          collectedSources.push(...data.sources);
+        }
+
         if (data.modelContent) {
           history.push(data.modelContent);
         }
@@ -371,6 +421,9 @@ export function initCopilotDrawer(controller: NoDroneController): void {
             const chip = createToolChip(turnUI.chipsRow, fc.name, fc.args || {});
             const toolResult = await controller.executeTool(fc.name, fc.args || {});
             chip.markResult(toolResult);
+            if (Array.isArray((toolResult as any)?.sources)) {
+              collectedSources.push(...((toolResult as any).sources as WebSearchSource[]));
+            }
             responseParts.push({
               functionResponse: {
                 ...(fc.id ? { id: fc.id } : {}),
@@ -392,8 +445,11 @@ export function initCopilotDrawer(controller: NoDroneController): void {
       }
 
       turnUI.textBubble.className =
-        'max-w-[90%] rounded-2xl rounded-bl-md bg-zinc-950/85 border border-zinc-800 px-3 py-2 text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap break-words';
+        'max-w-[90%] rounded-xl rounded-bl-sm bg-black/55 border border-white/10 px-3 py-2 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap break-words';
       turnUI.textBubble.textContent = finalText || 'Done.';
+      if (collectedSources.length > 0) {
+        appendSourcesToRow(turnUI.sourcesRow, collectedSources);
+      }
       scrollToBottom();
     } catch (err: any) {
       turnUI.textBubble.remove();
@@ -430,15 +486,15 @@ export function initCopilotDrawer(controller: NoDroneController): void {
     if (voiceDot) {
       voiceDot.className =
         state === 'speaking'
-          ? 'w-2 h-2 rounded-full bg-indigo-400 animate-pulse shrink-0'
+          ? 'w-2 h-2 rounded-full bg-[#e7cb88] animate-pulse shrink-0'
           : state === 'connecting'
             ? 'w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0'
             : 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0';
     }
     if (micBtn) {
       micBtn.className = active
-        ? 'flex items-center justify-center w-9 h-9 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/50 text-white transition-colors shrink-0 cursor-pointer'
-        : 'flex items-center justify-center w-9 h-9 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700/70 text-zinc-300 hover:text-white transition-colors shrink-0 cursor-pointer';
+        ? 'glass-btn flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/50 text-white shrink-0 cursor-pointer'
+        : 'chrono-pusher flex items-center justify-center w-9 h-9 rounded-lg shrink-0 cursor-pointer';
     }
   }
 
@@ -668,6 +724,9 @@ export function initCopilotDrawer(controller: NoDroneController): void {
             const chip = createToolChip(turn.chipsRow, fc.name, fc.args || {});
             const result = await controller.executeTool(fc.name, fc.args || {});
             chip.markResult(result);
+            if (Array.isArray((result as any)?.sources)) {
+              appendSourcesToRow(turn.sourcesRow, (result as any).sources as WebSearchSource[]);
+            }
             functionResponses.push({
               ...(fc.id ? { id: fc.id } : {}),
               name: fc.name,

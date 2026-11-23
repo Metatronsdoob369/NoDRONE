@@ -9,6 +9,24 @@ export type HealthState = 'ok' | 'warn' | 'critical';
 export type FlightMode = 'explore' | 'wasd' | 'orbit' | 'tour';
 export type MeasureMode = 'off' | 'distance' | 'area';
 export type PanelTab = 'map' | 'flight' | 'manifest';
+export type ActiveCard = 'world' | 'flight' | 'capture' | 'site' | 'weather' | 'telemetry' | null;
+export type HudMode = 'rail' | 'summon' | 'zen';
+
+export interface UiControlEntry {
+  id: string;
+  label: string;
+  card: string;
+  active?: boolean;
+  value?: string;
+  disabled?: boolean;
+}
+
+export interface UiStateSnapshot {
+  hudMode: HudMode;
+  activeCard: ActiveCard;
+  copilotOpen: boolean;
+  visibleControls: UiControlEntry[];
+}
 
 export interface TilesetEntry {
   id: number;
@@ -146,6 +164,12 @@ export interface CopilotContextSnapshot {
     cloudCoverPct: number;
     updatedAt: string;
   } | null;
+  uiState?: UiStateSnapshot;
+}
+
+export interface WebSearchSource {
+  title: string;
+  uri: string;
 }
 
 export interface CopilotToolResult {
@@ -158,6 +182,7 @@ export interface NoDroneController {
   executeTool: (name: string, args: Record<string, unknown>) => Promise<CopilotToolResult>;
   hideControlPanel: () => void;
   onControlPanelToggle?: (visible: boolean) => void;
+  onUiStateChange?: (snapshot: CopilotContextSnapshot) => void;
   isCopilotDrawerVisible?: () => boolean;
   setCopilotDrawerVisible?: (visible: boolean) => void;
 }

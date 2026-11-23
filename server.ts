@@ -2,12 +2,12 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { handleApiRequest } from './server/apiRouter.js';
-import { attachCopilotLiveWebSocket } from './server/copilotLive.js';
+import { handleApiRequest } from './server/apiRouter.ts';
+import { attachCopilotLiveWebSocket } from './server/copilotLive.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const DIST_DIR = path.join(__dirname, 'dist');
 
 const MIME_TYPES: Record<string, string> = {

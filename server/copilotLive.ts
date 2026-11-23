@@ -1,12 +1,13 @@
 import type { IncomingMessage, Server as HttpServer } from 'http';
 import type { Duplex } from 'stream';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { GoogleGenAI, Modality } from '@google/genai';
+import type { LiveServerMessage } from '@google/genai';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   COPILOT_LIVE_MODEL,
   COPILOT_TOOL_DECLARATIONS,
   buildSystemInstructionWithContext,
-} from './copilotService.js';
+} from './copilotService.ts';
 
 let liveAiClient: GoogleGenAI | null = null;
 
@@ -28,7 +29,7 @@ function getLiveGeminiClient(): GoogleGenAI | null {
 }
 
 interface ClientLiveMessage {
-  type: 'init' | 'audio' | 'text' | 'toolResponse' | 'close';
+  type: 'init' | 'audio' | 'text' | 'toolResponse' | 'uiContext' | 'close';
   context?: Record<string, unknown> | null;
   data?: string;
   text?: string;
@@ -265,6 +266,22 @@ export function attachCopilotLiveWebSocket(httpServer: HttpServer | null | undef
                 : fr.response,
             }));
             session.sendToolResponse({ functionResponses: enriched });
+          } else if (msg.type === 'uiContext' && msg.context) {
+            if (typeof session.sendClientContent === 'function') {
+              session.sendClientContent({
+                turns: [
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text: `[SILENT UI STATE UPDATE — do not reply unless spoken to]: ${JSON.stringify(msg.context)}`,
+                      },
+                    ],
+                  },
+                ],
+                turnComplete: false,
+              });
+            }
           }
         } catch (err: any) {
           console.warn('Gemini Live send error:', err?.message || err);
