@@ -45,11 +45,76 @@ export interface CameraBookmark {
   roll: number;
 }
 
+export type SurveyStatus = 'planned' | 'captured' | 'processed';
+
+export interface SurveyTilesetRef {
+  name: string;
+  ionAssetId: number;
+  type: '3dtiles' | '3dgs' | 'mesh' | 'imagery' | string;
+  visible: boolean;
+  clippingGeoJsonAssetId: number | null;
+}
+
+export interface SurveyAssetBundle {
+  imagery: {
+    provider: string;
+    ionAssetId?: number | null;
+    capturedAt?: string | null;
+    url?: string | null;
+  } | null;
+  mesh: SurveyTilesetRef | null;
+  splat: {
+    name?: string;
+    ionAssetId?: number | null;
+    url?: string | null;
+    format?: string;
+  } | null;
+  tilesets: SurveyTilesetRef[];
+  clippingGeoJsonAssetId: number | null;
+  bundleProvenanceSha256?: string | null;
+}
+
+export interface SurveyPathRef {
+  pathId: string;
+  name: string;
+  format: 'nodrone-camera-path/1' | 'ges-tracking' | 'camera-matrices' | 'splatthat-bundle';
+  url?: string | null;
+  sampleCount?: number;
+  smoothMode?: 'linear' | 'catmull-rom';
+}
+
+export interface SurveyRecord {
+  surveyId: string;
+  capturedAt: string;
+  label: string;
+  status: SurveyStatus;
+  notes?: string;
+  verticalOffsetMeters?: number;
+  assets: SurveyAssetBundle;
+  bookmarks: CameraBookmark[];
+  paths: SurveyPathRef[];
+  provenance: {
+    quotable: false;
+    provenanceTag: 'observed_guide_internal';
+    createdAt: string;
+    updatedAt: string;
+  };
+}
+
+export interface SurveyCompareHook {
+  baselineSurveyId: string | null;
+  targetSurveyId: string | null;
+  mode: 'off' | 'split' | 'swipe';
+}
+
 export interface SiteManifest {
   schemaVersion: string;
   siteId: string;
   title: string;
   exportedAt: string;
+  activeSurveyId: string;
+  compareSurveyId: string | null;
+  comparisonHook: SurveyCompareHook;
   geodesy: {
     sourceCRS: string;
     convertedBy: string;
@@ -66,13 +131,9 @@ export interface SiteManifest {
     defaultSSE: number;
     clippingGeoJsonAssetId: number | null;
   };
-  tilesets: Array<{
-    name: string;
-    ionAssetId: number;
-    type: string;
-    visible: boolean;
-    clippingGeoJsonAssetId: number | null;
-  }>;
+  surveys: SurveyRecord[];
+  /** Legacy v1.0 mirrors of the active survey for backwards compatibility */
+  tilesets: SurveyTilesetRef[];
   bookmarks: CameraBookmark[];
 }
 
@@ -184,6 +245,20 @@ export interface CopilotContextSnapshot {
     updatedAt: string;
   } | null;
   geoBox?: GeoDrawBoxSnapshot | null;
+  surveyCatalog?: {
+    activeSurveyId: string;
+    compareSurveyId: string | null;
+    surveyCount: number;
+    surveys: Array<{
+      surveyId: string;
+      capturedAt: string;
+      label: string;
+      status: SurveyStatus;
+      tilesetCount: number;
+      bookmarkCount: number;
+      hasSplat: boolean;
+    }>;
+  };
   uiState?: UiStateSnapshot;
 }
 

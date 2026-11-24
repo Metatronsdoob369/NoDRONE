@@ -14,6 +14,9 @@ import type {
   RecordedClip,
   SiteManifest,
   SiteWeatherData,
+  SurveyRecord,
+  SurveyStatus,
+  SurveyTilesetRef,
   TilesetEntry,
   UiControlEntry,
   UiStateSnapshot,
@@ -42,6 +45,16 @@ import {
   type UnitQuaternion,
 } from './geodesy';
 import { MAJOR_CITIES, US_STATES, WORLD_COUNTRIES } from './placesDataset';
+import {
+  classifyTilesetRefs,
+  createDefaultSurveyRecord,
+  createSurveyId,
+  normalizeSiteManifest,
+  normalizeSurveyStatus,
+  resolveSurveySelection,
+  sortSurveysNewestFirst,
+  toIsoDateOnly,
+} from './surveyCatalog';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
 const DEFAULT_ION_TOKEN = '';
@@ -210,6 +223,14 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
   let activeClipAssetId: number | null = null;
   let activeClippingCollection: any = null;
   let cameraBookmarks: CameraBookmark[] = [];
+
+  // Survey Catalog State (Schema 2.0 dated epochs + dormant Before/After compare hook)
+  let surveyCatalog: SurveyRecord[] = [
+    createDefaultSurveyRecord({ label: 'Baseline Survey', status: 'planned' }),
+  ];
+  let activeSurveyId: string = surveyCatalog[0].surveyId;
+  let compareSurveyId: string | null = null;
+  let surveyCatalogTouched = false;
 
   // Chronograph HUD Choreography State (Clean globe on launch; single active card above bottom rail)
   let activeCard: ActiveCard = null;
@@ -3406,9 +3427,17 @@ let cameraPathRemove: (() => void) | null = null;
         sha256: digest,
       });
     }
+    const activeSurvey = getActiveSurvey();
     return {
       schema: 'nodrone-provenance/1.0',
       site: m.name,
+      survey: {
+        surveyId: activeSurvey.surveyId,
+        capturedAt: activeSurvey.capturedAt,
+        label: activeSurvey.label,
+        status: activeSurvey.status,
+        compareSurveyId,
+      },
       exportedAt: new Date().toISOString(),
       quotable: false,
       provenanceTag: 'observed_guide_internal',
@@ -3427,6 +3456,7 @@ let cameraPathRemove: (() => void) | null = null;
     resolution: [number, number]
   ): Record<string, unknown> {
     const m = computeGeoBoxMetrics(box);
+    const activeSurvey = getActiveSurvey();
     const centerCartesian = Cesium.Cartesian3.fromDegrees(
       m.centerLon,
       m.centerLat,
@@ -3435,11 +3465,18 @@ let cameraPathRemove: (() => void) | null = null;
     const firstK = poses[0]?.K ?? computePinholeK(resolution[0], resolution[1], 40);
     const blenderFocalMm = blenderFocalLengthMm(firstK.fx, firstK.width, 36.0);
     return {
-      schema: 'nodrone-splat-bundle/1.1',
+      schema: 'nodrone-splat-bundle/1.2',
       targetStudio: 'SplatEarthTheory (-splatthat)',
       exportedAt: new Date().toISOString(),
       quotable: false,
       provenance: 'observed_guide_internal',
+      survey: {
+        surveyId: activeSurvey.surveyId,
+        capturedAt: activeSurvey.capturedAt,
+        label: activeSurvey.label,
+        status: activeSurvey.status,
+        compareSurveyId,
+      },
       asset: {
         name: m.name,
         slug: m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site-asset',
@@ -3508,9 +3545,12 @@ let cameraPathRemove: (() => void) | null = null;
     resolution: [number, number]
   ): Record<string, unknown> {
     const m = computeGeoBoxMetrics(box);
+    const activeSurvey = getActiveSurvey();
     return {
       schema: 'nodrone-camera-path/1',
       site: m.name,
+      surveyId: activeSurvey.surveyId,
+      capturedAt: activeSurvey.capturedAt,
       recordedAt: new Date().toISOString(),
       quotable: false,
       mode: 'geo-box-multiview',
@@ -3714,15 +3754,38 @@ let cameraPathRemove: (() => void) | null = null;
 
         // Decoupled Sidecar Provenance Registry with cryptographic SHA-256 hashes of every artifact + PNG frame
         const provenanceJson = await buildGeoBoxProvenanceJson(boxSnapshot, zipEntries);
+        const provenanceBytes = encoder.encode(JSON.stringify(provenanceJson, null, 2));
+        const provenanceDigest = await sha256Hex(provenanceBytes);
         zipEntries.splice(6, 0, {
           name: 'provenance.json',
-          data: encoder.encode(JSON.stringify(provenanceJson, null, 2)),
+          data: provenanceBytes,
         });
+
+        // Stamp capture provenance & path reference onto the active Survey Catalog epoch
+        const activeSurvey = getActiveSurvey();
+        activeSurvey.assets.bundleProvenanceSha256 = provenanceDigest;
+        if (activeSurvey.status === 'planned') {
+          activeSurvey.status = 'captured';
+        }
+        const pathId = `rig-${activeSurvey.surveyId}-${Date.now().toString(36)}`;
+        activeSurvey.paths = [
+          ...activeSurvey.paths.filter((p) => p.name !== `${m.name} Rig`),
+          {
+            pathId,
+            name: `${m.name} Rig`,
+            format: 'splatthat-bundle',
+            sampleCount: poses.length,
+            smoothMode: 'linear',
+          },
+        ];
+        activeSurvey.provenance.updatedAt = new Date().toISOString();
+        surveyCatalogTouched = true;
+        renderSurveyCatalogUI();
 
         const zipBlob = buildStoreZipBlob(zipEntries);
         const slug =
           m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site-asset';
-        const fileName = `${slug}-splatthat-bundle.zip`;
+        const fileName = `${slug}-${activeSurvey.surveyId}-splatthat-bundle.zip`;
         const url = URL.createObjectURL(zipBlob);
         const a = document.createElement('a');
         a.href = url;
@@ -3730,9 +3793,9 @@ let cameraPathRemove: (() => void) | null = null;
         a.click();
         window.setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-        showToast(`Studio Bundle ready: ${poses.length} views + 7 manifests (${formatFileSizeMb(zipBlob.size)})`);
+        showToast(`Studio Bundle ready (${activeSurvey.surveyId}): ${poses.length} views + 7 manifests (${formatFileSizeMb(zipBlob.size)})`);
         logEvent(
-          `Exported Splat Studio Bundle "${fileName}" (${poses.length} PNG views + anchors.json + camera_matrices.json + trajectory.json + splatthat-bundle.json + provenance.json + camera-path.json + GeoJSON).`,
+          `Exported Splat Studio Bundle "${fileName}" linked to survey "${activeSurvey.surveyId}" (${poses.length} PNG views + 7 manifests).`,
           'ok'
         );
       } else if (geoBoxCaptureCancelled) {
@@ -4475,11 +4538,40 @@ let cameraPathRemove: (() => void) | null = null;
         logEvent('Click "ion Token" to unlock World Terrain & 3DGS Tilesets.', 'info');
       }
 
-      // Auto-load a hosted site_manifest.json if provided via ?manifest=URL
+      // Render initial Survey Catalog UI and resolve ?manifest=, ?survey=, ?compare= URL parameters
       const params = new URLSearchParams(window.location.search);
       const manifestUrl = params.get('manifest');
+      const requestedSurveyId = params.get('survey');
+      const requestedCompareId = params.get('compare');
+
       if (manifestUrl) {
-        await loadManifestFromUrl(manifestUrl);
+        await loadManifestFromUrl(manifestUrl, {
+          requestedSurveyId,
+          requestedCompareId,
+        });
+      } else {
+        if (requestedSurveyId) {
+          const existing = surveyCatalog.find(
+            (s) =>
+              s.surveyId.toLowerCase() === requestedSurveyId.trim().toLowerCase() ||
+              s.capturedAt === requestedSurveyId.trim()
+          );
+          if (existing) {
+            activeSurveyId = existing.surveyId;
+          } else {
+            // Preserve deep-linked survey ID on the active epoch until a manifest is loaded
+            const active = getActiveSurvey();
+            active.surveyId = requestedSurveyId.trim();
+            active.capturedAt = toIsoDateOnly(requestedSurveyId.trim());
+            activeSurveyId = active.surveyId;
+          }
+          surveyCatalogTouched = true;
+        }
+        if (requestedCompareId && requestedCompareId.trim() !== activeSurveyId) {
+          compareSurveyId = requestedCompareId.trim();
+          surveyCatalogTouched = true;
+        }
+        renderSurveyCatalogUI();
       }
     } catch (err: any) {
       console.error('Cesium init error:', err);
@@ -4828,6 +4920,7 @@ let cameraPathRemove: (() => void) | null = null;
       empty.className = 'text-[11px] text-zinc-500 italic';
       empty.textContent = 'No custom 3DGS / 3D Tilesets loaded yet.';
       tilesetListEl.appendChild(empty);
+      renderSurveyCatalogUI();
       return;
     }
 
@@ -4878,6 +4971,7 @@ let cameraPathRemove: (() => void) | null = null;
       row.append(info, actions);
       tilesetListEl.appendChild(row);
     });
+    renderSurveyCatalogUI();
   }
 
   function setTilesetVisibleById(
@@ -5127,6 +5221,7 @@ let cameraPathRemove: (() => void) | null = null;
       empty.className = 'text-[11px] text-zinc-500 italic';
       empty.textContent = 'No camera views saved yet.';
       bookmarkListEl.appendChild(empty);
+      renderSurveyCatalogUI();
       return;
     }
 
@@ -5170,9 +5265,523 @@ let cameraPathRemove: (() => void) | null = null;
       row.append(info, actions);
       bookmarkListEl.appendChild(row);
     });
+    renderSurveyCatalogUI();
+  }
+
+  // =========================================================================
+  // Survey Catalog (Schema 2.0) — Dated Epochs, URL Routing & B/A Hook
+  // =========================================================================
+
+  function getActiveSurvey(): SurveyRecord {
+    let found = surveyCatalog.find((s) => s.surveyId === activeSurveyId);
+    if (!found) {
+      if (surveyCatalog.length === 0) {
+        surveyCatalog = [createDefaultSurveyRecord({ label: 'Baseline Survey', status: 'planned' })];
+      }
+      found = surveyCatalog[0];
+      activeSurveyId = found.surveyId;
+    }
+    return found;
+  }
+
+  function parseSplatReferenceInput(raw: string, label: string): SurveyRecord['assets']['splat'] {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    if (/^\d+$/.test(trimmed)) {
+      const id = Number(trimmed);
+      if (Number.isFinite(id) && id > 0) {
+        return {
+          name: `${label} 3DGS`,
+          ionAssetId: id,
+          url: null,
+          format: '3dtiles-3dgs',
+        };
+      }
+    }
+    const lower = trimmed.toLowerCase();
+    const format = lower.endsWith('.ply')
+      ? 'ply'
+      : lower.endsWith('.spz')
+        ? 'spz'
+        : lower.endsWith('.splat')
+          ? 'splat'
+          : 'url';
+    return {
+      name: `${label} Splat`,
+      ionAssetId: null,
+      url: trimmed,
+      format,
+    };
+  }
+
+  function formatSplatReferenceInput(splat: SurveyRecord['assets']['splat']): string {
+    if (!splat) return '';
+    if (splat.url) return splat.url;
+    if (typeof splat.ionAssetId === 'number' && splat.ionAssetId > 0) {
+      return String(splat.ionAssetId);
+    }
+    return '';
+  }
+
+  function syncSurveyUrlParams(forceWrite = false): void {
+    try {
+      const url = new URL(window.location.href);
+      const hadSurveyParam = url.searchParams.has('survey') || url.searchParams.has('compare');
+      if (!forceWrite && !hadSurveyParam && !surveyCatalogTouched && surveyCatalog.length <= 1) {
+        return;
+      }
+      url.searchParams.set('survey', activeSurveyId);
+      if (compareSurveyId && compareSurveyId !== activeSurveyId) {
+        url.searchParams.set('compare', compareSurveyId);
+      } else {
+        url.searchParams.delete('compare');
+      }
+      window.history.replaceState({}, '', url.toString());
+    } catch {
+      // Ignore history restrictions inside sandboxed iframes
+    }
+  }
+
+  function syncLiveSceneIntoActiveSurvey(): void {
+    const active = getActiveSurvey();
+    const liveTilesets: SurveyTilesetRef[] = activeTilesets.map((t) => {
+      const lower = t.name.toLowerCase();
+      const inferredType =
+        lower.includes('splat') || lower.includes('3dgs') || lower.includes('gaussian')
+          ? '3dgs'
+          : '3dtiles';
+      return {
+        name: t.name,
+        ionAssetId: t.id,
+        type: inferredType,
+        visible: t.visible,
+        clippingGeoJsonAssetId: activeClipAssetId,
+      };
+    });
+
+    // Preserve explicit offline/unconnected tileset refs if live scene hasn't loaded ion tiles yet
+    const effectiveTilesets =
+      liveTilesets.length > 0 || ionConnected ? liveTilesets : active.assets.tilesets;
+    const classified = classifyTilesetRefs(effectiveTilesets);
+
+    active.verticalOffsetMeters = Number(currentHeightOffset.toFixed(2));
+    active.assets.tilesets = effectiveTilesets;
+    active.assets.mesh = classified.mesh;
+    if (classified.splat && !active.assets.splat?.url) {
+      active.assets.splat = classified.splat;
+    }
+    active.assets.clippingGeoJsonAssetId = activeClipAssetId;
+    active.assets.imagery = {
+      provider: google3DEnabled
+        ? 'Google Photorealistic 3D Tiles'
+        : ionConnected
+          ? 'Cesium ion Bing Aerial'
+          : 'Esri World Imagery',
+      capturedAt: active.capturedAt,
+    };
+    active.bookmarks = cameraBookmarks.map((b) => ({ ...b }));
+    active.provenance.updatedAt = new Date().toISOString();
+  }
+
+  function clearAllLoadedTilesets(): void {
+    if (viewer?.scene?.primitives) {
+      for (const item of activeTilesets) {
+        try {
+          viewer.scene.primitives.remove(item.tileset);
+        } catch {
+          // Ignore already-removed primitive
+        }
+      }
+    }
+    activeTilesets = [];
+    renderTilesetList();
+    updateTilesetMetric();
+  }
+
+  function renderSurveyCatalogUI(): void {
+    const active = getActiveSurvey();
+    const ordered = sortSurveysNewestFirst(surveyCatalog);
+
+    const countEl = el<HTMLSpanElement>('survey-count');
+    if (countEl) {
+      countEl.textContent = `${ordered.length} ${ordered.length === 1 ? 'epoch' : 'epochs'}`;
+    }
+
+    const activeIdEl = el<HTMLSpanElement>('survey-active-id');
+    if (activeIdEl) {
+      activeIdEl.textContent = active.surveyId;
+      activeIdEl.title = `Active Survey ID: ${active.surveyId}`;
+    }
+
+    // Subtle header badge appears once multiple epochs exist, a compare hook is armed, or a manifest/survey was activated
+    const hudSurveyBtn = el<HTMLButtonElement>('btn-hud-survey');
+    const hudSurveyLabel = el<HTMLSpanElement>('hud-survey-label');
+    if (hudSurveyBtn && hudSurveyLabel) {
+      const showBadge = surveyCatalogTouched || ordered.length > 1 || Boolean(compareSurveyId);
+      hudSurveyBtn.classList.toggle('hidden', !showBadge);
+      hudSurveyBtn.classList.toggle('flex', showBadge);
+      hudSurveyLabel.textContent = compareSurveyId
+        ? `${active.capturedAt} ↔ B/A`
+        : `${active.capturedAt} · ${active.label}`;
+    }
+
+    // Populate active survey inline metadata editor (avoid clobbering focused input)
+    const dateInput = el<HTMLInputElement>('input-active-survey-date');
+    const labelInput = el<HTMLInputElement>('input-active-survey-label');
+    const statusSelect = el<HTMLSelectElement>('select-active-survey-status');
+    const splatInput = el<HTMLInputElement>('input-active-survey-splat');
+    if (dateInput && document.activeElement !== dateInput) {
+      dateInput.value = active.capturedAt;
+    }
+    if (labelInput && document.activeElement !== labelInput) {
+      labelInput.value = active.label;
+    }
+    if (statusSelect && document.activeElement !== statusSelect) {
+      statusSelect.value = active.status;
+    }
+    if (splatInput && document.activeElement !== splatInput) {
+      splatInput.value = formatSplatReferenceInput(active.assets.splat);
+    }
+
+    // Dormant Before/After Compare Hook banner
+    const compareBanner = el<HTMLDivElement>('survey-compare-banner');
+    const compareText = el<HTMLSpanElement>('survey-compare-text');
+    if (compareBanner && compareText) {
+      const compareTarget = compareSurveyId
+        ? ordered.find((s) => s.surveyId === compareSurveyId)
+        : null;
+      if (compareTarget && compareTarget.surveyId !== active.surveyId) {
+        compareBanner.classList.remove('hidden');
+        compareText.textContent = `B/A Hook: ${active.capturedAt} (${active.label}) ↔ ${compareTarget.capturedAt} (${compareTarget.label}) · ready for split/swipe`;
+      } else {
+        compareBanner.classList.add('hidden');
+      }
+    }
+
+    const listEl = el<HTMLDivElement>('survey-list');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    for (const item of ordered) {
+      const isActive = item.surveyId === active.surveyId;
+      const isCompare = item.surveyId === compareSurveyId && !isActive;
+
+      const row = document.createElement('div');
+      row.className = isActive
+        ? 'flex items-center justify-between gap-2 rounded-md px-2 py-1.5 bg-[#d4af63]/14 border border-[#d4af63]/50 transition-colors'
+        : 'flex items-center justify-between gap-2 rounded-md px-2 py-1.5 bg-black/40 border border-white/8 hover:border-white/20 transition-colors';
+
+      const mainBtn = document.createElement('button');
+      mainBtn.type = 'button';
+      mainBtn.className = 'flex-1 min-w-0 text-left flex items-center gap-2 cursor-pointer';
+      mainBtn.title = `Switch to survey "${item.surveyId}"`;
+      mainBtn.addEventListener('click', () => {
+        if (!isActive) {
+          void selectSurvey(item.surveyId, { flyToFirst: true });
+        }
+      });
+
+      const dot = document.createElement('span');
+      dot.className = isActive
+        ? 'w-1.5 h-1.5 rounded-full bg-[#e7cb88] shrink-0'
+        : 'w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0';
+
+      const textCol = document.createElement('div');
+      textCol.className = 'min-w-0 flex-1';
+
+      const topLine = document.createElement('div');
+      topLine.className = 'flex items-center gap-1.5 min-w-0';
+
+      const dateSpan = document.createElement('span');
+      dateSpan.className = isActive
+        ? 'text-[10px] font-mono font-semibold text-[#e7cb88] shrink-0 tabular-nums'
+        : 'text-[10px] font-mono text-slate-300 shrink-0 tabular-nums';
+      dateSpan.textContent = item.capturedAt;
+
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'text-[11px] font-medium text-slate-100 truncate';
+      labelSpan.textContent = item.label;
+
+      const statusSpan = document.createElement('span');
+      const statusColor =
+        item.status === 'processed'
+          ? 'text-emerald-300'
+          : item.status === 'captured'
+            ? 'text-sky-300'
+            : 'text-slate-400';
+      statusSpan.className = `text-[9px] font-mono uppercase tracking-[0.06em] shrink-0 ${statusColor}`;
+      statusSpan.textContent = item.status;
+
+      topLine.append(dateSpan, labelSpan, statusSpan);
+
+      const metaLine = document.createElement('div');
+      metaLine.className = 'text-[9px] font-mono text-slate-400 truncate';
+      const tileCount = isActive ? activeTilesets.length : item.assets.tilesets.length;
+      const bmCount = isActive ? cameraBookmarks.length : item.bookmarks.length;
+      const parts: string[] = [item.surveyId];
+      if (tileCount > 0) parts.push(`${tileCount} ${tileCount === 1 ? 'tileset' : 'tilesets'}`);
+      if (item.assets.splat) parts.push('splat');
+      if (bmCount > 0) parts.push(`${bmCount} ${bmCount === 1 ? 'view' : 'views'}`);
+      if (item.paths.length > 0) parts.push(`${item.paths.length} ${item.paths.length === 1 ? 'path' : 'paths'}`);
+      metaLine.textContent = parts.join(' · ');
+
+      textCol.append(topLine, metaLine);
+      mainBtn.append(dot, textCol);
+
+      const actions = document.createElement('div');
+      actions.className = 'flex items-center gap-1 shrink-0';
+
+      if (!isActive) {
+        const btnCompare = document.createElement('button');
+        btnCompare.type = 'button';
+        btnCompare.className = isCompare
+          ? 'px-1.5 py-0.5 rounded bg-[#d4af63]/25 border border-[#d4af63]/60 text-[9px] font-mono font-semibold text-[#e7cb88] cursor-pointer'
+          : 'px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/12 border border-white/10 text-[9px] font-mono text-slate-300 cursor-pointer';
+        btnCompare.textContent = isCompare ? 'B/A ✓' : 'B/A';
+        btnCompare.title = isCompare
+          ? 'Clear Before/After comparison hook'
+          : 'Arm this survey as Before/After comparison target (?compare=)';
+        btnCompare.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setCompareSurvey(isCompare ? null : item.surveyId);
+        });
+        actions.appendChild(btnCompare);
+      }
+
+      if (ordered.length > 1) {
+        const btnDel = document.createElement('button');
+        btnDel.type = 'button';
+        btnDel.className =
+          'px-1.5 py-0.5 rounded bg-red-950/50 hover:bg-red-900/70 text-[10px] font-mono text-red-300 cursor-pointer';
+        btnDel.textContent = '×';
+        btnDel.title = `Remove survey "${item.label}"`;
+        btnDel.addEventListener('click', (e) => {
+          e.stopPropagation();
+          void deleteSurveyEpoch(item.surveyId);
+        });
+        actions.appendChild(btnDel);
+      }
+
+      row.append(mainBtn, actions);
+      listEl.appendChild(row);
+    }
+  }
+
+  function setCompareSurvey(targetId: string | null, silent = false): void {
+    if (!targetId || targetId === activeSurveyId) {
+      compareSurveyId = null;
+    } else {
+      const exists = surveyCatalog.find((s) => s.surveyId === targetId);
+      compareSurveyId = exists ? exists.surveyId : null;
+    }
+    surveyCatalogTouched = true;
+    syncSurveyUrlParams(true);
+    renderSurveyCatalogUI();
+    notifyUiStateChanged();
+    if (!silent) {
+      if (compareSurveyId) {
+        logEvent(`Armed Before/After comparison hook: ${activeSurveyId} ↔ ${compareSurveyId}.`, 'info');
+        showToast(`B/A hook armed: ${compareSurveyId}`);
+      } else {
+        logEvent('Cleared Before/After comparison hook.', 'info');
+        showToast('Cleared B/A comparison hook');
+      }
+    }
+  }
+
+  async function selectSurvey(
+    targetId: string,
+    options?: {
+      skipSnapshot?: boolean;
+      flyToFirst?: boolean;
+      silent?: boolean;
+      syncUrl?: boolean;
+    }
+  ): Promise<boolean> {
+    const target =
+      surveyCatalog.find((s) => s.surveyId === targetId) ||
+      surveyCatalog.find((s) => s.capturedAt === targetId);
+    if (!target) {
+      if (!options?.silent) {
+        showToast(`Survey "${targetId}" not found in catalog.`, 'error');
+      }
+      return false;
+    }
+
+    if (!options?.skipSnapshot && target.surveyId !== activeSurveyId) {
+      syncLiveSceneIntoActiveSurvey();
+    }
+
+    activeSurveyId = target.surveyId;
+    if (compareSurveyId === activeSurveyId) {
+      compareSurveyId = null;
+    }
+    surveyCatalogTouched = true;
+
+    // Swap live scene tilesets & clipping polygon to the target survey's assets
+    clearAllLoadedTilesets();
+
+    if (typeof target.verticalOffsetMeters === 'number' && Number.isFinite(target.verticalOffsetMeters)) {
+      applyHeightNudge(target.verticalOffsetMeters);
+    }
+
+    const clipId = target.assets.clippingGeoJsonAssetId ?? null;
+    const clipInput = el<HTMLInputElement>('input-clip-asset-id');
+    if (clipId) {
+      if (clipInput) clipInput.value = String(clipId);
+      if (ionConnected) {
+        await applyClippingGeoJson(clipId);
+      }
+    } else {
+      if (clipInput) clipInput.value = '';
+      if (activeClipAssetId !== null) {
+        clearClippingGeoJson();
+      }
+    }
+
+    const tilesetsToLoad = [...target.assets.tilesets];
+    // If survey specifies a numeric splat ionAssetId not already in tilesets, include it
+    if (
+      target.assets.splat?.ionAssetId &&
+      !tilesetsToLoad.some((t) => t.ionAssetId === target.assets.splat!.ionAssetId)
+    ) {
+      tilesetsToLoad.push({
+        name: target.assets.splat.name || `${target.label} 3DGS`,
+        ionAssetId: target.assets.splat.ionAssetId,
+        type: '3dgs',
+        visible: true,
+        clippingGeoJsonAssetId: clipId,
+      });
+    }
+
+    if (tilesetsToLoad.length > 0) {
+      if (ionConnected) {
+        for (const ts of tilesetsToLoad) {
+          if (ts?.ionAssetId) {
+            await loadIonTileset(ts.ionAssetId, ts.name || `Asset #${ts.ionAssetId}`);
+            if (ts.visible === false) {
+              setTilesetVisibleById(ts.ionAssetId, false);
+            }
+          }
+        }
+      } else if (!options?.silent) {
+        logEvent(
+          `Survey "${target.surveyId}" references ${tilesetsToLoad.length} Cesium ion asset(s) — connect ion Token to stream them.`,
+          'info'
+        );
+      }
+    }
+
+    cameraBookmarks = target.bookmarks.map((b) => ({ ...b }));
+    renderBookmarkList();
+
+    if (options?.flyToFirst && cameraBookmarks.length > 0) {
+      flyToBookmark(cameraBookmarks[0]);
+    }
+
+    if (options?.syncUrl !== false) {
+      syncSurveyUrlParams(true);
+    }
+    renderSurveyCatalogUI();
+    notifyUiStateChanged();
+
+    if (!options?.silent) {
+      logEvent(`Active survey switched to "${target.label}" (${target.capturedAt} · ${target.surveyId}).`, 'ok');
+      showToast(`Survey: ${target.capturedAt} · ${target.label}`);
+    }
+    return true;
+  }
+
+  async function createNewSurveyEpoch(input: {
+    capturedAt?: string;
+    label?: string;
+    status?: SurveyStatus;
+    splatInput?: string;
+    cloneBookmarks?: boolean;
+  }): Promise<SurveyRecord> {
+    syncLiveSceneIntoActiveSurvey();
+    const prevActive = getActiveSurvey();
+    const capturedAt = toIsoDateOnly(input.capturedAt);
+    const label = (input.label || '').trim() || `Survey ${capturedAt}`;
+    const splat = parseSplatReferenceInput(input.splatInput || '', label);
+
+    const record = createDefaultSurveyRecord({
+      capturedAt,
+      label,
+      status: input.status ? normalizeSurveyStatus(input.status) : splat ? 'processed' : 'planned',
+      verticalOffsetMeters: currentHeightOffset,
+      clippingGeoJsonAssetId: activeClipAssetId,
+      bookmarks: input.cloneBookmarks !== false ? prevActive.bookmarks : [],
+      splatUrl: splat?.url ?? null,
+      splatAssetId: splat?.ionAssetId ?? null,
+      existingIds: surveyCatalog.map((s) => s.surveyId),
+    });
+
+    surveyCatalog = sortSurveysNewestFirst([...surveyCatalog, record]);
+    surveyCatalogTouched = true;
+    await selectSurvey(record.surveyId, { skipSnapshot: true, flyToFirst: false, silent: true });
+    logEvent(`Created survey epoch "${record.label}" (${record.surveyId}).`, 'ok');
+    showToast(`Created survey: ${record.capturedAt} · ${record.label}`);
+    return record;
+  }
+
+  async function deleteSurveyEpoch(surveyId: string): Promise<void> {
+    if (surveyCatalog.length <= 1) {
+      showToast('Site manifest must keep at least one survey epoch.', 'info');
+      return;
+    }
+    const target = surveyCatalog.find((s) => s.surveyId === surveyId);
+    if (!target) return;
+    surveyCatalog = surveyCatalog.filter((s) => s.surveyId !== surveyId);
+    if (compareSurveyId === surveyId) {
+      compareSurveyId = null;
+    }
+    if (activeSurveyId === surveyId) {
+      const next = sortSurveysNewestFirst(surveyCatalog)[0];
+      await selectSurvey(next.surveyId, { skipSnapshot: true, flyToFirst: false, silent: true });
+    } else {
+      syncSurveyUrlParams(true);
+      renderSurveyCatalogUI();
+      notifyUiStateChanged();
+    }
+    logEvent(`Removed survey epoch "${target.label}" (${target.surveyId}).`, 'info');
+    showToast(`Removed survey: ${target.label}`);
+  }
+
+  function copyActiveSurveyUrl(): void {
+    syncSurveyUrlParams(true);
+    const urlStr = window.location.href;
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard
+        .writeText(urlStr)
+        .then(() => {
+          showToast(`Copied survey link (?survey=${activeSurveyId})`);
+          logEvent(`Copied survey URL: ${urlStr}`, 'ok');
+        })
+        .catch(() => {
+          showToast('Could not copy URL to clipboard.', 'error');
+        });
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = urlStr;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        showToast(`Copied survey link (?survey=${activeSurveyId})`);
+      } catch {
+        showToast('Could not copy URL to clipboard.', 'error');
+      }
+      ta.remove();
+    }
   }
 
   function buildSiteManifest(): SiteManifest {
+    syncLiveSceneIntoActiveSurvey();
+    const active = getActiveSurvey();
+    const orderedSurveys = sortSurveysNewestFirst(surveyCatalog);
     const title = (el<HTMLInputElement>('input-site-title')?.value || 'SplatMap Site').trim();
     const siteId = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'splatmap-site';
     const sourceCRS = (el<HTMLInputElement>('input-source-crs')?.value || 'NAD83 / NAVD88').trim();
@@ -5198,11 +5807,25 @@ let cameraPathRemove: (() => void) | null = null;
       };
     }
 
+    const validCompare =
+      compareSurveyId &&
+      compareSurveyId !== active.surveyId &&
+      orderedSurveys.some((s) => s.surveyId === compareSurveyId)
+        ? compareSurveyId
+        : null;
+
     return {
-      schemaVersion: '1.0',
+      schemaVersion: '2.0',
       siteId,
       title,
       exportedAt: new Date().toISOString(),
+      activeSurveyId: active.surveyId,
+      compareSurveyId: validCompare,
+      comparisonHook: {
+        baselineSurveyId: active.surveyId,
+        targetSurveyId: validCompare,
+        mode: 'off',
+      },
       geodesy: {
         sourceCRS,
         convertedBy: 'MSP GEOTRANS',
@@ -5215,14 +5838,9 @@ let cameraPathRemove: (() => void) | null = null;
         defaultSSE: currentSSE,
         clippingGeoJsonAssetId: activeClipAssetId,
       },
-      tilesets: activeTilesets.map((t) => ({
-        name: t.name,
-        ionAssetId: t.id,
-        type: '3dtiles',
-        visible: t.visible,
-        clippingGeoJsonAssetId: activeClipAssetId,
-      })),
-      bookmarks: cameraBookmarks,
+      surveys: orderedSurveys,
+      tilesets: active.assets.tilesets.map((t) => ({ ...t })),
+      bookmarks: active.bookmarks.map((b) => ({ ...b })),
     };
   }
 
@@ -5239,10 +5857,10 @@ let cameraPathRemove: (() => void) | null = null;
     a.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     logEvent(
-      `Exported "${manifest.siteId}_manifest.json" (${manifest.tilesets.length} tilesets, ${manifest.bookmarks.length} bookmarks).`,
+      `Exported "${manifest.siteId}_manifest.json" (Schema 2.0 · ${manifest.surveys.length} survey epoch(s), active: ${manifest.activeSurveyId}).`,
       'ok'
     );
-    showToast(`Exported ${manifest.siteId}_manifest.json`);
+    showToast(`Exported ${manifest.siteId}_manifest.json (${manifest.surveys.length} surveys)`);
   }
 
   function copySiteManifestToClipboard(): void {
@@ -5256,8 +5874,8 @@ let cameraPathRemove: (() => void) | null = null;
     ta.select();
     try {
       document.execCommand('copy');
-      logEvent('Copied site_manifest.json to clipboard.', 'ok');
-      showToast('Copied site_manifest.json to clipboard.');
+      logEvent(`Copied Schema 2.0 site_manifest.json (${manifest.surveys.length} surveys) to clipboard.`, 'ok');
+      showToast('Copied Schema 2.0 manifest to clipboard.');
     } catch {
       logEvent('Clipboard copy blocked—use Export JSON instead.', 'warn');
       showToast('Copy blocked—click Export JSON instead.', 'error');
@@ -5265,79 +5883,61 @@ let cameraPathRemove: (() => void) | null = null;
     ta.remove();
   }
 
-  async function applySiteManifest(manifest: any): Promise<void> {
-    if (!manifest || typeof manifest !== 'object') {
-      throw new Error('Invalid manifest JSON structure.');
+  async function applySiteManifest(
+    rawManifest: any,
+    options?: {
+      requestedSurveyId?: string | null;
+      requestedCompareId?: string | null;
     }
+  ): Promise<void> {
+    const { manifest, upgradedFromV1 } = normalizeSiteManifest(rawManifest);
 
-    logEvent(`Applying site manifest "${manifest.title || manifest.siteId || 'Untitled'}"...`, 'info');
+    logEvent(
+      `Applying site manifest "${manifest.title}" (Schema 2.0${upgradedFromV1 ? ', upgraded from v1.0' : ''} · ${manifest.surveys.length} survey epoch(s))...`,
+      'info'
+    );
 
-    if (manifest.title) {
-      const titleInput = el<HTMLInputElement>('input-site-title');
-      if (titleInput) titleInput.value = String(manifest.title);
-    }
-    if (manifest.geodesy?.sourceCRS) {
-      const crsInput = el<HTMLInputElement>('input-source-crs');
-      if (crsInput) crsInput.value = String(manifest.geodesy.sourceCRS);
-    }
+    const titleInput = el<HTMLInputElement>('input-site-title');
+    if (titleInput) titleInput.value = manifest.title;
+    const crsInput = el<HTMLInputElement>('input-source-crs');
+    if (crsInput) crsInput.value = manifest.geodesy.sourceCRS;
 
-    if (manifest.layers && typeof manifest.layers.defaultSSE === 'number') {
-      currentSSE = manifest.layers.defaultSSE;
-      const sliderSSE = el<HTMLInputElement>('slider-sse');
-      const valSSE = el<HTMLSpanElement>('val-sse');
-      if (sliderSSE) sliderSSE.value = String(currentSSE);
-      if (valSSE) valSSE.textContent = `${currentSSE} px`;
-    }
+    applySSE(manifest.layers.defaultSSE);
+    applyHeightNudge(manifest.geodesy.verticalOffsetMeters);
 
-    if (manifest.geodesy && typeof manifest.geodesy.verticalOffsetMeters === 'number') {
-      currentHeightOffset = manifest.geodesy.verticalOffsetMeters;
-      const sliderH = el<HTMLInputElement>('slider-height-offset');
-      const valH = el<HTMLSpanElement>('val-height-offset');
-      if (sliderH) sliderH.value = String(currentHeightOffset);
-      if (valH) valH.textContent = `${currentHeightOffset >= 0 ? '+' : ''}${currentHeightOffset.toFixed(1)} m`;
-    }
-
-    if (manifest.layers && ionConnected) {
-      if (typeof manifest.layers.worldTerrain === 'boolean' && manifest.layers.worldTerrain !== worldTerrainEnabled) {
+    if (ionConnected) {
+      if (manifest.layers.worldTerrain !== worldTerrainEnabled) {
         await toggleWorldTerrain();
       }
-      if (typeof manifest.layers.google3DTiles === 'boolean' && manifest.layers.google3DTiles !== google3DEnabled) {
+      if (manifest.layers.google3DTiles !== google3DEnabled) {
         await toggleGoogle3DTiles();
       }
     }
 
-    const clipId =
-      manifest.layers?.clippingGeoJsonAssetId ||
-      (Array.isArray(manifest.tilesets)
-        ? manifest.tilesets.find((t: any) => t?.clippingGeoJsonAssetId)?.clippingGeoJsonAssetId
-        : null) ||
-      null;
-    if (clipId) {
-      const clipInput = el<HTMLInputElement>('input-clip-asset-id');
-      if (clipInput) clipInput.value = String(clipId);
-      if (ionConnected) {
-        await applyClippingGeoJson(clipId);
-      }
-    }
+    surveyCatalog = manifest.surveys;
+    surveyCatalogTouched = true;
 
-    if (Array.isArray(manifest.tilesets)) {
-      for (const ts of manifest.tilesets) {
-        if (ts?.ionAssetId) {
-          await loadIonTileset(ts.ionAssetId, ts.name || `Asset #${ts.ionAssetId}`);
-        }
-      }
-    }
+    const urlParams = new URLSearchParams(window.location.search);
+    const desiredSurvey = options?.requestedSurveyId ?? urlParams.get('survey');
+    const desiredCompare =
+      options?.requestedCompareId ?? urlParams.get('compare') ?? manifest.compareSurveyId;
 
-    if (Array.isArray(manifest.bookmarks)) {
-      cameraBookmarks = manifest.bookmarks.filter(
-        (b: any) => b && typeof b.lat === 'number' && typeof b.lon === 'number'
-      );
-      renderBookmarkList();
-    }
+    const resolved = resolveSurveySelection(
+      surveyCatalog,
+      desiredSurvey,
+      desiredCompare,
+      manifest.activeSurveyId
+    );
+    compareSurveyId = resolved.compareSurveyId;
 
-    if (cameraBookmarks.length > 0) {
-      flyToBookmark(cameraBookmarks[0]);
-    } else if (manifest.geodesy?.wgs84Origin) {
+    await selectSurvey(resolved.activeSurveyId, {
+      skipSnapshot: true,
+      flyToFirst: true,
+      silent: true,
+      syncUrl: true,
+    });
+
+    if (cameraBookmarks.length === 0 && manifest.geodesy?.wgs84Origin) {
       const o = manifest.geodesy.wgs84Origin;
       if (typeof o.lat === 'number' && typeof o.lon === 'number') {
         const latInput = el<HTMLInputElement>('input-lat');
@@ -5350,17 +5950,27 @@ let cameraPathRemove: (() => void) | null = null;
       }
     }
 
-    logEvent(`Loaded manifest "${manifest.title || manifest.siteId || 'Site'}".`, 'ok');
-    showToast(`Loaded manifest: ${manifest.title || manifest.siteId || 'Site'}`);
+    const active = getActiveSurvey();
+    logEvent(
+      `Loaded "${manifest.title}" · ${surveyCatalog.length} survey(s) · active: ${active.capturedAt} "${active.label}"${compareSurveyId ? ` · B/A hook: ${compareSurveyId}` : ''}.`,
+      'ok'
+    );
+    showToast(`Loaded "${manifest.title}" · ${active.capturedAt} (${active.label})`);
   }
 
-  async function loadManifestFromUrl(url: string): Promise<void> {
+  async function loadManifestFromUrl(
+    url: string,
+    options?: {
+      requestedSurveyId?: string | null;
+      requestedCompareId?: string | null;
+    }
+  ): Promise<void> {
     try {
       logEvent(`Fetching manifest from ${url}...`, 'info');
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      await applySiteManifest(json);
+      await applySiteManifest(json, options);
     } catch (err: any) {
       logEvent(`Failed to load manifest URL: ${err?.message || err}`, 'error');
       showToast('Could not load manifest from URL.', 'error');
@@ -5920,7 +6530,95 @@ let cameraPathRemove: (() => void) | null = null;
     el<HTMLButtonElement>('btn-close-clip-modal')?.addEventListener('click', closeClipModal);
     el<HTMLButtonElement>('btn-close-clip-modal-footer')?.addEventListener('click', closeClipModal);
 
-    // Site Manifest Builder Controls
+    // Site Manifest Builder & Survey Catalog Controls
+    el<HTMLButtonElement>('btn-hud-survey')?.addEventListener('click', () => {
+      setActiveCard('site');
+    });
+
+    const newSurveyForm = el<HTMLDivElement>('new-survey-form');
+    const newSurveyDateInput = el<HTMLInputElement>('input-new-survey-date');
+    const newSurveyLabelInput = el<HTMLInputElement>('input-new-survey-label');
+    const newSurveyStatusSelect = el<HTMLSelectElement>('select-new-survey-status');
+    const newSurveySplatInput = el<HTMLInputElement>('input-new-survey-splat');
+
+    el<HTMLButtonElement>('btn-toggle-new-survey')?.addEventListener('click', () => {
+      if (!newSurveyForm) return;
+      const opening = newSurveyForm.classList.contains('hidden');
+      newSurveyForm.classList.toggle('hidden', !opening);
+      if (opening) {
+        if (newSurveyDateInput && !newSurveyDateInput.value) {
+          newSurveyDateInput.value = toIsoDateOnly();
+        }
+        newSurveyLabelInput?.focus();
+      }
+    });
+    el<HTMLButtonElement>('btn-cancel-new-survey')?.addEventListener('click', () => {
+      newSurveyForm?.classList.add('hidden');
+    });
+    el<HTMLButtonElement>('btn-create-survey')?.addEventListener('click', async () => {
+      const capturedAt = newSurveyDateInput?.value || toIsoDateOnly();
+      const label = newSurveyLabelInput?.value || '';
+      const status = normalizeSurveyStatus(newSurveyStatusSelect?.value);
+      const splatInput = newSurveySplatInput?.value || '';
+      await createNewSurveyEpoch({ capturedAt, label, status, splatInput });
+      if (newSurveyLabelInput) newSurveyLabelInput.value = '';
+      if (newSurveySplatInput) newSurveySplatInput.value = '';
+      newSurveyForm?.classList.add('hidden');
+    });
+    el<HTMLButtonElement>('btn-copy-survey-url')?.addEventListener('click', copyActiveSurveyUrl);
+    el<HTMLButtonElement>('btn-clear-compare-survey')?.addEventListener('click', () => {
+      setCompareSurvey(null);
+    });
+
+    // Active Survey inline metadata editing
+    el<HTMLInputElement>('input-active-survey-date')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLInputElement).value;
+      if (!val) return;
+      const active = getActiveSurvey();
+      const otherIds = surveyCatalog.filter((s) => s.surveyId !== active.surveyId).map((s) => s.surveyId);
+      const prevId = active.surveyId;
+      active.capturedAt = toIsoDateOnly(val);
+      active.surveyId = createSurveyId(active.capturedAt, active.label, otherIds);
+      active.provenance.updatedAt = new Date().toISOString();
+      activeSurveyId = active.surveyId;
+      if (compareSurveyId === prevId) compareSurveyId = null;
+      surveyCatalogTouched = true;
+      syncSurveyUrlParams(true);
+      renderSurveyCatalogUI();
+    });
+    el<HTMLInputElement>('input-active-survey-label')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLInputElement).value.trim();
+      if (!val) return;
+      const active = getActiveSurvey();
+      const otherIds = surveyCatalog.filter((s) => s.surveyId !== active.surveyId).map((s) => s.surveyId);
+      active.label = val;
+      active.surveyId = createSurveyId(active.capturedAt, active.label, otherIds);
+      active.provenance.updatedAt = new Date().toISOString();
+      activeSurveyId = active.surveyId;
+      surveyCatalogTouched = true;
+      syncSurveyUrlParams(true);
+      renderSurveyCatalogUI();
+    });
+    el<HTMLSelectElement>('select-active-survey-status')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLSelectElement).value;
+      const active = getActiveSurvey();
+      active.status = normalizeSurveyStatus(val);
+      active.provenance.updatedAt = new Date().toISOString();
+      surveyCatalogTouched = true;
+      renderSurveyCatalogUI();
+    });
+    el<HTMLInputElement>('input-active-survey-splat')?.addEventListener('change', (e) => {
+      const val = (e.target as HTMLInputElement).value;
+      const active = getActiveSurvey();
+      active.assets.splat = parseSplatReferenceInput(val, active.label);
+      if (active.assets.splat && active.status === 'planned') {
+        active.status = 'processed';
+      }
+      active.provenance.updatedAt = new Date().toISOString();
+      surveyCatalogTouched = true;
+      renderSurveyCatalogUI();
+    });
+
     el<HTMLButtonElement>('btn-load-manifest')?.addEventListener('click', () => {
       if (!manifestFileInput) return;
       manifestFileInput.value = '';
@@ -6249,6 +6947,12 @@ let cameraPathRemove: (() => void) | null = null;
     'btn-box-export-json': 'box',
     'btn-box-export-geojson': 'box',
     'btn-box-copy-coords': 'box',
+    'btn-toggle-new-survey': 'site',
+    'btn-copy-survey-url': 'site',
+    'input-active-survey-date': 'site',
+    'input-active-survey-label': 'site',
+    'select-active-survey-status': 'site',
+    'input-active-survey-splat': 'site',
     'input-site-title': 'site',
     'input-source-crs': 'site',
     'btn-load-manifest': 'site',
@@ -6636,6 +7340,20 @@ let cameraPathRemove: (() => void) | null = null;
           }
         : null,
       geoBox: geoBox ? computeGeoBoxMetrics(geoBox) : null,
+      surveyCatalog: {
+        activeSurveyId,
+        compareSurveyId,
+        surveyCount: surveyCatalog.length,
+        surveys: sortSurveysNewestFirst(surveyCatalog).map((s) => ({
+          surveyId: s.surveyId,
+          capturedAt: s.capturedAt,
+          label: s.label,
+          status: s.status,
+          tilesetCount: s.surveyId === activeSurveyId ? activeTilesets.length : s.assets.tilesets.length,
+          bookmarkCount: s.surveyId === activeSurveyId ? cameraBookmarks.length : s.bookmarks.length,
+          hasSplat: Boolean(s.assets.splat),
+        })),
+      },
       uiState,
     };
   }
@@ -6919,13 +7637,40 @@ let cameraPathRemove: (() => void) | null = null;
         case 'loadManifest': {
           const raw = args.json;
           const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          await applySiteManifest(parsed);
+          await applySiteManifest(parsed, {
+            requestedSurveyId: typeof args.surveyId === 'string' ? args.surveyId : null,
+            requestedCompareId: typeof args.compareSurveyId === 'string' ? args.compareSurveyId : null,
+          });
           return {
             ok: true,
             title: parsed?.title || parsed?.siteId || 'Site',
-            tilesetsLoaded: Array.isArray(parsed?.tilesets) ? parsed.tilesets.length : 0,
-            bookmarksLoaded: Array.isArray(parsed?.bookmarks) ? parsed.bookmarks.length : 0,
+            activeSurveyId,
+            compareSurveyId,
+            surveyCount: surveyCatalog.length,
+            tilesetsLoaded: activeTilesets.length,
+            bookmarksLoaded: cameraBookmarks.length,
           };
+        }
+
+        case 'selectSurvey': {
+          const surveyId = String(args.surveyId || '').trim();
+          const ok = await selectSurvey(surveyId, { flyToFirst: args.flyToFirst !== false });
+          if (typeof args.compareSurveyId === 'string') {
+            setCompareSurvey(args.compareSurveyId.trim() || null, true);
+          }
+          return ok
+            ? { ok: true, activeSurveyId, compareSurveyId }
+            : { ok: false, error: `Survey "${surveyId}" not found.` };
+        }
+
+        case 'createSurvey': {
+          const created = await createNewSurveyEpoch({
+            capturedAt: typeof args.capturedAt === 'string' ? args.capturedAt : undefined,
+            label: typeof args.label === 'string' ? args.label : undefined,
+            status: typeof args.status === 'string' ? normalizeSurveyStatus(args.status) : undefined,
+            splatInput: typeof args.splat === 'string' ? args.splat : undefined,
+          });
+          return { ok: true, survey: created };
         }
 
         case 'openPanel': {

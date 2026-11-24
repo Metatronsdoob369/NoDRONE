@@ -103,6 +103,12 @@
         <span id="hud-location-text" class="text-[11px] font-mono text-slate-200 truncate">Locating…</span>
       </div>
       <div class="h-6 w-px bg-white/12 mx-0.5 shrink-0"></div>
+      <button id="btn-hud-survey" type="button" title="Active Survey Epoch — click to open Survey Catalog" class="hidden chrono-pusher items-center gap-1.5 text-[11px] font-mono px-2 py-1.5 rounded-lg shrink-0 cursor-pointer whitespace-nowrap text-[#e7cb88]">
+        <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
+        </svg>
+        <span id="hud-survey-label" class="max-w-[130px] truncate"></span>
+      </button>
       <button id="btn-hud-map-labels" type="button" data-active="true" title="Toggle City, State, Country & Road Map Labels Overlay" class="chrono-pusher flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg shrink-0 cursor-pointer whitespace-nowrap">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.158.69.158 1.006 0z" />
@@ -699,16 +705,95 @@
       </div>
     </section>
 
-    <!-- CARD 05: SITE (Manifest JSON, Camera Bookmarks, 3D Surface Measurement) -->
-    <section id="card-site" data-card="site" data-tucked="true" aria-hidden="true" class="tuck-panel tuck-card hidden pointer-events-auto w-full max-w-[46rem] max-h-[58vh] overflow-y-auto glass-panel chrono-card rounded-xl p-3.5 space-y-3">
+    <!-- CARD 04: SITE (Survey Catalog, Manifest v2.0 JSON, Camera Bookmarks, 3D Surface Measurement) -->
+    <section id="card-site" data-card="site" data-tucked="true" aria-hidden="true" class="tuck-panel tuck-card hidden pointer-events-auto w-full max-w-[48rem] max-h-[66vh] overflow-y-auto glass-panel chrono-card rounded-xl p-3.5 space-y-3">
       <div class="flex items-center justify-between border-b border-white/10 pb-2">
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 min-w-0">
           <span class="text-[10px] font-mono text-[#d4af63]">04</span>
-          <h2 class="text-[11px] font-mono uppercase tracking-[0.16em] text-slate-100">Site Workbench</h2>
+          <h2 class="text-[11px] font-mono uppercase tracking-[0.16em] text-slate-100 whitespace-nowrap">Site Workbench</h2>
           <span class="text-white/20" aria-hidden="true">·</span>
-          <span class="text-[10px] font-mono text-emerald-300">Schema 1.0</span>
+          <span class="text-[10px] font-mono text-emerald-300 whitespace-nowrap">Schema 2.0</span>
+          <span class="text-white/20 hidden sm:inline" aria-hidden="true">·</span>
+          <span id="survey-active-id" class="hidden sm:inline text-[10px] font-mono text-[#e7cb88] truncate"></span>
         </div>
         <button type="button" data-card-done class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap">Done</button>
+      </div>
+
+      <!-- Survey Catalog (Dated Epochs linking Imagery, Mesh, 3DGS Splats & Bookmarks) -->
+      <div class="glass-well rounded-lg p-2.5 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#e7cb88] whitespace-nowrap">Survey Catalog</span>
+            <span id="survey-count" class="text-[10px] font-mono text-slate-400 tabular-nums">1 epoch</span>
+          </div>
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button id="btn-copy-survey-url" type="button" title="Copy deep-link URL with ?survey= parameter" class="chrono-pusher px-2 py-1 rounded-md text-[10px] font-mono text-slate-300 cursor-pointer whitespace-nowrap">Copy URL</button>
+            <button id="btn-toggle-new-survey" type="button" class="chrono-pusher chrono-pusher-gold px-2.5 py-1 rounded-md text-[10px] font-mono font-semibold cursor-pointer whitespace-nowrap">+ New Survey</button>
+          </div>
+        </div>
+
+        <!-- Inline New Survey Form (hidden by default) -->
+        <div id="new-survey-form" class="hidden rounded-md bg-black/50 border border-[#d4af63]/30 p-2 space-y-2">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+            <div>
+              <label for="input-new-survey-date" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Capture Date</label>
+              <input id="input-new-survey-date" type="date" class="w-full glass-input rounded-md px-2 py-1 text-xs font-mono text-slate-100 focus:outline-none" />
+            </div>
+            <div>
+              <label for="input-new-survey-label" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Epoch Label</label>
+              <input id="input-new-survey-label" type="text" placeholder="e.g. Post-Storm, Q4 As-Built" class="w-full glass-input rounded-md px-2 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none" />
+            </div>
+            <div>
+              <label for="select-new-survey-status" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Status</label>
+              <select id="select-new-survey-status" class="w-full glass-input rounded-md px-2 py-1 text-xs font-mono text-slate-100 focus:outline-none">
+                <option value="planned">planned</option>
+                <option value="captured">captured</option>
+                <option value="processed">processed</option>
+              </select>
+            </div>
+          </div>
+          <div class="flex items-end gap-1.5">
+            <div class="flex-1 min-w-0">
+              <label for="input-new-survey-splat" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Splat Reference (Optional Ion Asset ID or .ply/.spz URL)</label>
+              <input id="input-new-survey-splat" type="text" placeholder="e.g. 4547222 or https://.../scene.spz" class="w-full glass-input rounded-md px-2 py-1 text-xs font-mono text-slate-100 placeholder-slate-500 focus:outline-none" />
+            </div>
+            <button id="btn-create-survey" type="button" class="chrono-pusher chrono-pusher-gold px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer whitespace-nowrap">Create</button>
+            <button id="btn-cancel-new-survey" type="button" class="chrono-pusher px-2.5 py-1.5 rounded-md text-xs text-slate-400 cursor-pointer whitespace-nowrap">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Active Survey Metadata Editor -->
+        <div class="grid grid-cols-2 sm:grid-cols-12 gap-1.5 items-end">
+          <div class="sm:col-span-3">
+            <label for="input-active-survey-date" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Active Date</label>
+            <input id="input-active-survey-date" type="date" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 focus:outline-none" />
+          </div>
+          <div class="sm:col-span-4">
+            <label for="input-active-survey-label" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Active Survey Label</label>
+            <input id="input-active-survey-label" type="text" placeholder="Baseline Survey" class="w-full glass-input rounded-md px-2 py-1 text-[11px] text-slate-100 focus:outline-none" />
+          </div>
+          <div class="sm:col-span-2">
+            <label for="select-active-survey-status" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Status</label>
+            <select id="select-active-survey-status" class="w-full glass-input rounded-md px-1.5 py-1 text-[11px] font-mono text-slate-100 focus:outline-none">
+              <option value="planned">planned</option>
+              <option value="captured">captured</option>
+              <option value="processed">processed</option>
+            </select>
+          </div>
+          <div class="sm:col-span-3">
+            <label for="input-active-survey-splat" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Splat ID / URL</label>
+            <input id="input-active-survey-splat" type="text" placeholder="None linked" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 placeholder-slate-500 focus:outline-none" />
+          </div>
+        </div>
+
+        <!-- Before/After Compare Hook Banner (shown when a comparison epoch is armed) -->
+        <div id="survey-compare-banner" class="hidden flex items-center justify-between gap-2 rounded-md bg-[#d4af63]/10 border border-[#d4af63]/35 px-2.5 py-1.5 text-[10px] font-mono">
+          <span id="survey-compare-text" class="text-[#e7cb88] truncate"></span>
+          <button id="btn-clear-compare-survey" type="button" class="text-slate-300 hover:text-white underline cursor-pointer shrink-0">Clear</button>
+        </div>
+
+        <!-- Dated Survey List -->
+        <div id="survey-list" class="space-y-1 max-h-28 overflow-y-auto"></div>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
