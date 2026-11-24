@@ -47,6 +47,11 @@ export interface CameraBookmark {
 
 export type SurveyStatus = 'planned' | 'captured' | 'processed';
 
+export interface SurveySplatLoadError {
+  message: string;
+  source: string;
+}
+
 export interface SurveyTilesetRef {
   name: string;
   ionAssetId: number;
@@ -93,6 +98,8 @@ export interface SurveyRecord {
   assets: SurveyAssetBundle;
   bookmarks: CameraBookmark[];
   paths: SurveyPathRef[];
+  /** Set by the splat load callback. Absent until a .ply/.spz/.splat load fails. */
+  splatLoadError?: SurveySplatLoadError | null;
   provenance: {
     quotable: false;
     provenanceTag: 'observed_guide_internal';

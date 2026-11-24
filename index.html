@@ -34,6 +34,7 @@
   <!-- Hidden Site Manifest & Render Path JSON File Inputs -->
   <input type="file" id="input-manifest-file" accept=".json,application/json" class="hidden" />
   <input type="file" id="input-render-path-file" accept=".json,application/json" class="hidden" />
+  <input type="file" id="input-survey-splat-file" accept=".ply,.spz,.splat,application/octet-stream" class="hidden" />
 
   <!-- Co-Pilot Real-Time Spotlight Callout Tag -->
   <div id="copilot-spotlight-tag" class="hidden fixed z-[60] pointer-events-none px-2.5 py-1 rounded-md bg-[#12161f]/95 border border-[#d4af63]/80 text-[11px] font-mono text-[#f6e6be] shadow-[0_10px_28px_rgba(0,0,0,0.75)] whitespace-nowrap"></div>
@@ -793,6 +794,13 @@
             <input id="input-active-survey-splat" type="text" placeholder="None linked" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 placeholder-slate-500 focus:outline-none" />
           </div>
         </div>
+
+        <div class="flex items-center gap-1.5">
+          <button id="btn-load-survey-splat-file" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[10px] font-mono text-slate-200 cursor-pointer whitespace-nowrap">Load .ply / .spz / .splat</button>
+          <button id="btn-reload-survey-splat" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[10px] font-mono text-slate-300 cursor-pointer whitespace-nowrap">Reload splat</button>
+          <span id="survey-splat-status" class="text-[10px] font-mono text-slate-400 truncate"></span>
+        </div>
+        <div id="survey-splat-error" role="alert" class="hidden rounded-md border border-red-400/45 bg-red-950/60 px-2.5 py-1.5 text-[10px] font-mono leading-snug text-red-100"></div>
 
         <!-- Before/After Compare Hook Banner (shown when a comparison epoch is armed) -->
         <div id="survey-compare-banner" class="hidden flex items-center justify-between gap-2 rounded-md bg-[#d4af63]/10 border border-[#d4af63]/35 px-2.5 py-1.5 text-[10px] font-mono">

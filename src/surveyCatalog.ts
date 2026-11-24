@@ -50,6 +50,14 @@ export function createSurveyId(
   return `${base}-${suffix}`;
 }
 
+function fileSplatFormatLabel(url: string | null | undefined): string {
+  const cleaned = (url || '').trim().split(/[?#]/)[0].toLowerCase();
+  if (cleaned.endsWith('.ply')) return 'ply';
+  if (cleaned.endsWith('.spz')) return 'spz';
+  if (cleaned.endsWith('.splat')) return 'splat';
+  return '3dtiles-3dgs';
+}
+
 export function normalizeSurveyStatus(value: unknown): SurveyStatus {
   const s = String(value ?? '').toLowerCase();
   if (VALID_STATUSES.includes(s as SurveyStatus)) {
@@ -117,17 +125,14 @@ export function createDefaultSurveyRecord(options?: {
           name: classified.splat?.name || `${label} Splat`,
           ionAssetId: options?.splatAssetId ?? classified.splat?.ionAssetId ?? null,
           url: options?.splatUrl ?? null,
-          format: options?.splatUrl?.toLowerCase().endsWith('.ply')
-            ? 'ply'
-            : options?.splatUrl?.toLowerCase().endsWith('.spz')
-              ? 'spz'
-              : '3dtiles-3dgs',
+          format: fileSplatFormatLabel(options?.splatUrl),
         }
       : classified.splat;
 
+  const hasIonSplat = typeof options?.splatAssetId === 'number' && options.splatAssetId > 0;
   const status: SurveyStatus = options?.status
     ? normalizeSurveyStatus(options.status)
-    : tilesets.length > 0 || splat
+    : tilesets.length > 0 || hasIonSplat
       ? 'processed'
       : 'planned';
 
@@ -340,7 +345,12 @@ export function normalizeSiteManifest(raw: unknown): NormalizedManifestResult {
         surveyId,
         capturedAt,
         label,
-        status: normalizeSurveyStatus(s.status ?? (tilesets.length > 0 || splat ? 'processed' : 'planned')),
+        status: normalizeSurveyStatus(
+          s.status ??
+            (tilesets.length > 0 || (splat && !splat.url && splat.ionAssetId)
+              ? 'processed'
+              : 'planned')
+        ),
         notes: typeof s.notes === 'string' && s.notes.trim() ? s.notes.trim() : undefined,
         verticalOffsetMeters:
           typeof s.verticalOffsetMeters === 'number' && Number.isFinite(s.verticalOffsetMeters)
