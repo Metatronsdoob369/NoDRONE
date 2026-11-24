@@ -64,6 +64,10 @@ import {
   sampleFlightSpline,
   verticalFovDegForLens,
 } from './flightSpline';
+import { geoBoxLocalToEnu, resolveSplatAnchor } from './splat/splatAnchor';
+import type { DecodedSplatCloud, SplatFileFormat } from './splat/splatthatLoader';
+import { parseSplatCloud, splatCloudRadius, splatFormatFromName } from './splat/splatthatLoader';
+import { applySplatLoadOutcome, type SplatLoadOutcome } from './splat/surveySplatStatus';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
 const DEFAULT_ION_TOKEN = '';
@@ -240,6 +244,12 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
   let activeSurveyId: string = surveyCatalog[0].surveyId;
   let compareSurveyId: string | null = null;
   let surveyCatalogTouched = false;
+  let siteGeodesyOrigin: { lat: number; lon: number; ellipsoidalHeight: number } | null = null;
+  const sessionSplatFiles = new Map<string, File>();
+  const splatLoadTokens = new Map<string, number>();
+  let surveySplatCollection: any = null;
+  let splatLoadGeneration = 0;
+  let surveySplatLoading = false;
 
   // Chronograph HUD Choreography State (Clean globe on launch; single active card above bottom rail)
   let activeCard: ActiveCard = null;
@@ -5425,14 +5435,7 @@ let cameraPathRemove: (() => void) | null = null;
         };
       }
     }
-    const lower = trimmed.toLowerCase();
-    const format = lower.endsWith('.ply')
-      ? 'ply'
-      : lower.endsWith('.spz')
-        ? 'spz'
-        : lower.endsWith('.splat')
-          ? 'splat'
-          : 'url';
+    const format = splatFormatFromName(trimmed) ?? 'url';
     return {
       name: `${label} Splat`,
       ionAssetId: null,
@@ -5570,6 +5573,32 @@ let cameraPathRemove: (() => void) | null = null;
       splatInput.value = formatSplatReferenceInput(active.assets.splat);
     }
 
+    const splatStatusEl = el<HTMLSpanElement>('survey-splat-status');
+    if (splatStatusEl) {
+      if (surveySplatLoading) {
+        splatStatusEl.textContent = 'Loading splat…';
+        splatStatusEl.className = 'text-[10px] font-mono text-[#e7cb88] truncate';
+      } else if (active.assets.splat && (active.assets.splat.url || sessionSplatFiles.has(active.surveyId))) {
+        const countLabel = surveySplatCollection ? 'in view' : 'linked';
+        splatStatusEl.textContent = `${active.status} · splat ${countLabel}`;
+        splatStatusEl.className = 'text-[10px] font-mono text-slate-400 truncate';
+      } else {
+        splatStatusEl.textContent = '';
+      }
+    }
+
+    const splatErrorEl = el<HTMLDivElement>('survey-splat-error');
+    if (splatErrorEl) {
+      const loadError = active.splatLoadError;
+      if (loadError) {
+        splatErrorEl.classList.remove('hidden');
+        splatErrorEl.textContent = `${loadError.message} — ${loadError.source}`;
+      } else {
+        splatErrorEl.classList.add('hidden');
+        splatErrorEl.textContent = '';
+      }
+    }
+
     // Dormant Before/After Compare Hook banner
     const compareBanner = el<HTMLDivElement>('survey-compare-banner');
     const compareText = el<HTMLSpanElement>('survey-compare-text');
@@ -5648,6 +5677,7 @@ let cameraPathRemove: (() => void) | null = null;
       const parts: string[] = [item.surveyId];
       if (tileCount > 0) parts.push(`${tileCount} ${tileCount === 1 ? 'tileset' : 'tilesets'}`);
       if (item.assets.splat) parts.push('splat');
+      if (item.splatLoadError) parts.push('load error');
       if (bmCount > 0) parts.push(`${bmCount} ${bmCount === 1 ? 'view' : 'views'}`);
       if (item.paths.length > 0) parts.push(`${item.paths.length} ${item.paths.length === 1 ? 'path' : 'paths'}`);
       metaLine.textContent = parts.join(' · ');
@@ -5713,6 +5743,239 @@ let cameraPathRemove: (() => void) | null = null;
         logEvent('Cleared Before/After comparison hook.', 'info');
         showToast('Cleared B/A comparison hook');
       }
+    }
+  }
+
+  function readSiteOrigin(): { lat: number; lon: number; ellipsoidalHeight: number } {
+    if (siteGeodesyOrigin) return siteGeodesyOrigin;
+    const lat = parseFloat(el<HTMLInputElement>('input-lat')?.value ?? '');
+    const lon = parseFloat(el<HTMLInputElement>('input-lon')?.value ?? '');
+    const alt = parseFloat(el<HTMLInputElement>('input-alt')?.value ?? '');
+    return {
+      lat: Number.isFinite(lat) ? lat : 33.5021,
+      lon: Number.isFinite(lon) ? lon : -82.0226,
+      ellipsoidalHeight: Number.isFinite(alt) ? alt : 450,
+    };
+  }
+
+  function surveyFileSplatFormat(survey: SurveyRecord): SplatFileFormat | null {
+    const sessionFile = sessionSplatFiles.get(survey.surveyId);
+    if (sessionFile) return splatFormatFromName(sessionFile.name);
+    const splat = survey.assets.splat;
+    const url = splat?.url?.trim() || '';
+    if (!url) return null;
+    return (
+      splatFormatFromName(url) ??
+      (splat?.format === 'ply' || splat?.format === 'spz' || splat?.format === 'splat' ? splat.format : null)
+    );
+  }
+
+  function isFetchableSplatUrl(url: string): boolean {
+    return /^(https?:|data:|blob:)/i.test(url) || url.startsWith('/') || url.startsWith('./') || url.includes('/');
+  }
+
+  function clearSurveySplatPrimitive(): void {
+    if (surveySplatCollection && viewer?.scene?.primitives) {
+      try {
+        viewer.scene.primitives.remove(surveySplatCollection);
+      } catch {
+        // Primitive was already removed with the scene.
+      }
+    }
+    surveySplatCollection = null;
+  }
+
+  function commitSplatLoad(surveyId: string, outcome: SplatLoadOutcome): void {
+    const survey = surveyCatalog.find((item) => item.surveyId === surveyId);
+    if (!survey) return;
+    const next = applySplatLoadOutcome(survey, outcome);
+    survey.status = next.status;
+    survey.splatLoadError = next.splatLoadError;
+    survey.provenance = {
+      ...survey.provenance,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  function mountSurveySplatCloud(
+    cloud: DecodedSplatCloud,
+    anchor: { lat: number; lon: number; height: number }
+  ): void {
+    clearSurveySplatPrimitive();
+    const collection = new Cesium.PointPrimitiveCollection();
+    collection.modelMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(
+      Cesium.Cartesian3.fromDegrees(anchor.lon, anchor.lat, anchor.height)
+    );
+    for (let i = 0; i < cloud.count; i++) {
+      const enu = geoBoxLocalToEnu(
+        cloud.positions[i * 3],
+        cloud.positions[i * 3 + 1],
+        cloud.positions[i * 3 + 2]
+      );
+      const mean =
+        (Math.abs(cloud.scales[i * 3]) +
+          Math.abs(cloud.scales[i * 3 + 1]) +
+          Math.abs(cloud.scales[i * 3 + 2])) /
+        3;
+      collection.add({
+        position: new Cesium.Cartesian3(enu.e, enu.n, enu.u),
+        pixelSize: Math.max(2, Math.min(10, mean > 0 ? mean * 80 : 3)),
+        color: Cesium.Color.fromBytes(
+          cloud.colors[i * 4],
+          cloud.colors[i * 4 + 1],
+          cloud.colors[i * 4 + 2],
+          Math.max(40, cloud.colors[i * 4 + 3] || 0)
+        ),
+      });
+    }
+    viewer.scene.primitives.add(collection);
+    surveySplatCollection = collection;
+  }
+
+  function decodeSurveySplat(buffer: ArrayBuffer, format: SplatFileFormat): Promise<DecodedSplatCloud> {
+    return new Promise((resolve, reject) => {
+      let worker: Worker;
+      try {
+        worker = new Worker(new URL('./splat/splatDecode.worker.ts', import.meta.url), { type: 'module' });
+      } catch (err) {
+        void parseSplatCloud(buffer, format).then(resolve, reject);
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        worker.terminate();
+        reject(new Error('Splat decode timed out'));
+      }, 120_000);
+      worker.onmessage = (event: MessageEvent) => {
+        window.clearTimeout(timer);
+        worker.terminate();
+        if (event.data?.ok && event.data.cloud) {
+          resolve(event.data.cloud as DecodedSplatCloud);
+        } else {
+          reject(new Error(event.data?.message || 'Splat decode failed'));
+        }
+      };
+      worker.onerror = () => {
+        window.clearTimeout(timer);
+        worker.terminate();
+        reject(new Error('Splat decode worker failed'));
+      };
+      worker.postMessage({ buffer, format }, [buffer]);
+    });
+  }
+
+  function anchorForSurvey(survey: SurveyRecord): { lat: number; lon: number; height: number } {
+    const box = geoBox ? computeGeoBoxMetrics(geoBox) : null;
+    return resolveSplatAnchor({
+      siteOrigin: readSiteOrigin(),
+      surveyVerticalOffsetMeters: survey.verticalOffsetMeters,
+      siteVerticalOffsetMeters: currentHeightOffset,
+      geoBoxOrigin: box
+        ? {
+            lat: box.centerLat,
+            lon: box.centerLon,
+            baseEllipsoidalMeters: box.baseEllipsoidalMeters,
+          }
+        : null,
+    });
+  }
+
+  function isSurveySplatLoadCurrent(surveyId: string, token: number): boolean {
+    return splatLoadTokens.get(surveyId) === token;
+  }
+
+  function retireSurveySplatLoad(surveyId: string): void {
+    splatLoadTokens.set(surveyId, ++splatLoadGeneration);
+  }
+
+  function rekeySessionSplatFile(prevId: string, nextId: string): void {
+    if (prevId === nextId) return;
+    const file = sessionSplatFiles.get(prevId);
+    if (!file) return;
+    sessionSplatFiles.delete(prevId);
+    sessionSplatFiles.set(nextId, file);
+  }
+
+  async function loadSurveyFileSplat(
+    surveyId: string,
+    options?: { flyToSplat?: boolean }
+  ): Promise<void> {
+    const survey = surveyCatalog.find((item) => item.surveyId === surveyId);
+    if (!survey) return;
+    const format = surveyFileSplatFormat(survey);
+    if (!format) {
+      if (activeSurveyId === surveyId) clearSurveySplatPrimitive();
+      return;
+    }
+
+    const token = ++splatLoadGeneration;
+    splatLoadTokens.set(surveyId, token);
+    const source =
+      sessionSplatFiles.get(surveyId)?.name ||
+      survey.assets.splat?.url ||
+      survey.assets.splat?.name ||
+      'splat';
+    if (activeSurveyId === surveyId) {
+      clearSurveySplatPrimitive();
+      surveySplatLoading = true;
+      renderSurveyCatalogUI();
+    }
+
+    try {
+      let buffer: ArrayBuffer;
+      const file = sessionSplatFiles.get(surveyId);
+      if (file) {
+        buffer = await file.arrayBuffer();
+      } else {
+        const url = survey.assets.splat?.url?.trim() || '';
+        if (!url || !isFetchableSplatUrl(url)) {
+          throw new Error(`Local splat file "${source}" is not loaded in this session`);
+        }
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status} while fetching splat`);
+        buffer = await response.arrayBuffer();
+      }
+      if (!isSurveySplatLoadCurrent(surveyId, token)) return;
+      const cloud = await decodeSurveySplat(buffer, format);
+      if (!isSurveySplatLoadCurrent(surveyId, token)) return;
+      const current = surveyCatalog.find((item) => item.surveyId === surveyId);
+      if (!current) return;
+      const anchor = anchorForSurvey(current);
+      if (activeSurveyId === surveyId) {
+        mountSurveySplatCloud(cloud, anchor);
+        if (options?.flyToSplat !== false && viewer?.camera && !isRecording) {
+          const range = Math.max(40, splatCloudRadius(cloud) * 1.6);
+          viewer.camera.flyTo({
+            destination: Cesium.Cartesian3.fromDegrees(anchor.lon, anchor.lat, anchor.height + range),
+            orientation: {
+              heading: 0,
+              pitch: Cesium.Math.toRadians(-35),
+              roll: 0,
+            },
+            duration: 1.6,
+          });
+        }
+      }
+      commitSplatLoad(surveyId, { ok: true, source });
+      const kept = cloud.truncatedFrom
+        ? ` (showing ${cloud.count.toLocaleString()} of ${cloud.truncatedFrom.toLocaleString()})`
+        : '';
+      logEvent(
+        `Loaded splat "${source}" at the Geo-Box anchor (${anchor.lat.toFixed(5)}, ${anchor.lon.toFixed(5)}, ${anchor.height.toFixed(1)} m, ${cloud.count.toLocaleString()} gaussians${kept}).`,
+        'ok'
+      );
+      if (activeSurveyId === surveyId) showToast(`Splat loaded · ${current.label}`);
+    } catch (err: any) {
+      if (!isSurveySplatLoadCurrent(surveyId, token)) return;
+      const message = err?.message ? String(err.message) : 'Splat failed to load';
+      if (activeSurveyId === surveyId) clearSurveySplatPrimitive();
+      commitSplatLoad(surveyId, { ok: false, source, message });
+      logEvent(`Splat load failed (${source}): ${message}`, 'error');
+      if (activeSurveyId === surveyId) showToast(`${message} — ${source}`, 'error');
+    } finally {
+      if (!isSurveySplatLoadCurrent(surveyId, token)) return;
+      if (activeSurveyId === surveyId) surveySplatLoading = false;
+      renderSurveyCatalogUI();
+      notifyUiStateChanged();
     }
   }
 
@@ -5802,8 +6065,15 @@ let cameraPathRemove: (() => void) | null = null;
     cameraBookmarks = target.bookmarks.map((b) => ({ ...b }));
     renderBookmarkList();
 
-    if (options?.flyToFirst && cameraBookmarks.length > 0) {
-      flyToBookmark(cameraBookmarks[0]);
+    const hasFileSplat = Boolean(surveyFileSplatFormat(target));
+    if (hasFileSplat) {
+      void loadSurveyFileSplat(target.surveyId, { flyToSplat: options?.flyToFirst !== false });
+    } else {
+      clearSurveySplatPrimitive();
+      surveySplatLoading = false;
+      if (options?.flyToFirst && cameraBookmarks.length > 0) {
+        flyToBookmark(cameraBookmarks[0]);
+      }
     }
 
     if (options?.syncUrl !== false) {
@@ -5831,11 +6101,14 @@ let cameraPathRemove: (() => void) | null = null;
     const capturedAt = toIsoDateOnly(input.capturedAt);
     const label = (input.label || '').trim() || `Survey ${capturedAt}`;
     const splat = parseSplatReferenceInput(input.splatInput || '', label);
+    const requested = input.status ? normalizeSurveyStatus(input.status) : 'planned';
+    const fileSplat = Boolean(splat?.url && splatFormatFromName(splat.url));
+    const status: SurveyStatus = fileSplat && requested === 'processed' ? 'captured' : requested;
 
     const record = createDefaultSurveyRecord({
       capturedAt,
       label,
-      status: input.status ? normalizeSurveyStatus(input.status) : splat ? 'processed' : 'planned',
+      status,
       verticalOffsetMeters: currentHeightOffset,
       clippingGeoJsonAssetId: activeClipAssetId,
       bookmarks: input.cloneBookmarks !== false ? prevActive.bookmarks : [],
@@ -5846,7 +6119,11 @@ let cameraPathRemove: (() => void) | null = null;
 
     surveyCatalog = sortSurveysNewestFirst([...surveyCatalog, record]);
     surveyCatalogTouched = true;
-    await selectSurvey(record.surveyId, { skipSnapshot: true, flyToFirst: false, silent: true });
+    await selectSurvey(record.surveyId, {
+      skipSnapshot: true,
+      flyToFirst: fileSplat,
+      silent: true,
+    });
     logEvent(`Created survey epoch "${record.label}" (${record.surveyId}).`, 'ok');
     showToast(`Created survey: ${record.capturedAt} · ${record.label}`);
     return record;
@@ -5859,6 +6136,8 @@ let cameraPathRemove: (() => void) | null = null;
     }
     const target = surveyCatalog.find((s) => s.surveyId === surveyId);
     if (!target) return;
+    sessionSplatFiles.delete(surveyId);
+    retireSurveySplatLoad(surveyId);
     surveyCatalog = surveyCatalog.filter((s) => s.surveyId !== surveyId);
     if (compareSurveyId === surveyId) {
       compareSurveyId = null;
@@ -6039,6 +6318,20 @@ let cameraPathRemove: (() => void) | null = null;
       if (manifest.layers.google3DTiles !== google3DEnabled) {
         await toggleGoogle3DTiles();
       }
+    }
+
+    const origin = manifest.geodesy?.wgs84Origin;
+    if (origin && typeof origin.lat === 'number' && typeof origin.lon === 'number') {
+      siteGeodesyOrigin = {
+        lat: origin.lat,
+        lon: origin.lon,
+        ellipsoidalHeight:
+          typeof origin.ellipsoidalHeight === 'number' && Number.isFinite(origin.ellipsoidalHeight)
+            ? origin.ellipsoidalHeight
+            : 0,
+      };
+    } else {
+      siteGeodesyOrigin = null;
     }
 
     surveyCatalog = manifest.surveys;
@@ -6718,7 +7011,9 @@ let cameraPathRemove: (() => void) | null = null;
       const prevId = active.surveyId;
       active.capturedAt = toIsoDateOnly(val);
       active.surveyId = createSurveyId(active.capturedAt, active.label, otherIds);
-      active.provenance.updatedAt = new Date().toISOString();
+      active.provenance = { ...active.provenance, updatedAt: new Date().toISOString() };
+      rekeySessionSplatFile(prevId, active.surveyId);
+      retireSurveySplatLoad(prevId);
       activeSurveyId = active.surveyId;
       if (compareSurveyId === prevId) compareSurveyId = null;
       surveyCatalogTouched = true;
@@ -6730,9 +7025,12 @@ let cameraPathRemove: (() => void) | null = null;
       if (!val) return;
       const active = getActiveSurvey();
       const otherIds = surveyCatalog.filter((s) => s.surveyId !== active.surveyId).map((s) => s.surveyId);
+      const prevId = active.surveyId;
       active.label = val;
       active.surveyId = createSurveyId(active.capturedAt, active.label, otherIds);
-      active.provenance.updatedAt = new Date().toISOString();
+      active.provenance = { ...active.provenance, updatedAt: new Date().toISOString() };
+      rekeySessionSplatFile(prevId, active.surveyId);
+      retireSurveySplatLoad(prevId);
       activeSurveyId = active.surveyId;
       surveyCatalogTouched = true;
       syncSurveyUrlParams(true);
@@ -6749,13 +7047,59 @@ let cameraPathRemove: (() => void) | null = null;
     el<HTMLInputElement>('input-active-survey-splat')?.addEventListener('change', (e) => {
       const val = (e.target as HTMLInputElement).value;
       const active = getActiveSurvey();
-      active.assets.splat = parseSplatReferenceInput(val, active.label);
-      if (active.assets.splat && active.status === 'planned') {
-        active.status = 'processed';
-      }
-      active.provenance.updatedAt = new Date().toISOString();
+      sessionSplatFiles.delete(active.surveyId);
+      const splat = parseSplatReferenceInput(val, active.label);
+      active.assets = { ...active.assets, splat };
+      active.splatLoadError = null;
+      active.provenance = { ...active.provenance, updatedAt: new Date().toISOString() };
       surveyCatalogTouched = true;
-      renderSurveyCatalogUI();
+      if (splat && surveyFileSplatFormat(active)) {
+        void loadSurveyFileSplat(active.surveyId, { flyToSplat: true });
+      } else {
+        retireSurveySplatLoad(active.surveyId);
+        surveySplatLoading = false;
+        clearSurveySplatPrimitive();
+        renderSurveyCatalogUI();
+        notifyUiStateChanged();
+      }
+    });
+    el<HTMLButtonElement>('btn-load-survey-splat-file')?.addEventListener('click', () => {
+      const input = el<HTMLInputElement>('input-survey-splat-file');
+      if (!input) return;
+      input.value = '';
+      input.click();
+    });
+    el<HTMLInputElement>('input-survey-splat-file')?.addEventListener('change', (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const format = splatFormatFromName(file.name);
+      if (!format) {
+        showToast('Choose a .ply, .spz, or .splat file.', 'info');
+        return;
+      }
+      const active = getActiveSurvey();
+      sessionSplatFiles.set(active.surveyId, file);
+      active.assets = {
+        ...active.assets,
+        splat: {
+          name: file.name,
+          ionAssetId: null,
+          url: file.name,
+          format,
+        },
+      };
+      active.splatLoadError = null;
+      active.provenance = { ...active.provenance, updatedAt: new Date().toISOString() };
+      surveyCatalogTouched = true;
+      void loadSurveyFileSplat(active.surveyId, { flyToSplat: true });
+    });
+    el<HTMLButtonElement>('btn-reload-survey-splat')?.addEventListener('click', () => {
+      const active = getActiveSurvey();
+      if (!surveyFileSplatFormat(active)) {
+        showToast('Link a .ply, .spz, or .splat URL or file first.', 'info');
+        return;
+      }
+      void loadSurveyFileSplat(active.surveyId, { flyToSplat: true });
     });
 
     el<HTMLButtonElement>('btn-load-manifest')?.addEventListener('click', () => {
