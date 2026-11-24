@@ -55,6 +55,15 @@ import {
   sortSurveysNewestFirst,
   toIsoDateOnly,
 } from './surveyCatalog';
+import {
+  buildFlightExport,
+  isFlightCameraPathDocument,
+  isFlightTrajectoryDocument,
+  parseFlightCameraPathDocument,
+  parseFlightTrajectoryDocument,
+  sampleFlightSpline,
+  verticalFovDegForLens,
+} from './flightSpline';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
 const DEFAULT_ION_TOKEN = '';
@@ -252,6 +261,9 @@ export function initNoDroneCesiumApp(): NoDroneController | null {
   let orbitAccumulatedDeg = 0;
   let orbitAutoStopRec = false;
   let tourCancelled = false;
+  let tourHopMode = false;
+  let tourGeneration = 0;
+  let tourPlaybackRaf: number | null = null;
   let activeFlySeq = 0;
   let pendingCameraTarget: CameraState | null = null;
 
@@ -540,7 +552,11 @@ let cameraPathRemove: (() => void) | null = null;
       orbit: '360° Orbit',
       tour: 'Touring',
     };
-    if (statusLabel) statusLabel.textContent = names[flightMode];
+    if (statusLabel) {
+      statusLabel.textContent = flightMode === 'tour'
+        ? (tourHopMode ? 'Hop Tour' : 'Fly-Through')
+        : names[flightMode];
+    }
 
     document.querySelectorAll<HTMLButtonElement>('.flight-mode-btn').forEach((btn) => {
       const m = btn.dataset.flightMode as FlightMode;
@@ -558,8 +574,10 @@ let cameraPathRemove: (() => void) | null = null;
         flightHudHint.textContent = 'Click Explore or press Esc to release camera lock';
       } else if (flightMode === 'tour') {
         flightHudBanner.classList.remove('hidden');
-        flightHudLabel.textContent = 'Bookmark Camera Tour';
-        flightHudHint.textContent = 'Press Esc or click Explore to stop tour';
+        flightHudLabel.textContent = tourHopMode ? 'Bookmark Hop Tour' : 'Smooth Fly-Through';
+        flightHudHint.textContent = tourHopMode
+          ? 'Press Esc or click Explore to stop hop tour'
+          : 'Press Esc or click Explore to stop fly-through';
       } else {
         flightHudBanner.classList.add('hidden');
       }
@@ -573,6 +591,8 @@ let cameraPathRemove: (() => void) | null = null;
     }
     if (flightMode === 'tour') {
       tourCancelled = true;
+      tourGeneration += 1;
+      stopSmoothTourPlayback();
     }
     pressedKeys.clear();
     orbitAutoStopRec = false;
@@ -587,7 +607,12 @@ let cameraPathRemove: (() => void) | null = null;
       flightMode = 'tour';
       tourCancelled = false;
       updateFlightModeButtons();
-      runBookmarkTour();
+      const generation = tourGeneration;
+      if (tourHopMode) {
+        void runBookmarkTour(generation);
+      } else {
+        runSmoothTour(generation);
+      }
       return;
     }
 
@@ -619,13 +644,151 @@ let cameraPathRemove: (() => void) | null = null;
     }
   }
 
-  async function runBookmarkTour(): Promise<void> {
-    logEvent(`Starting camera tour across ${cameraBookmarks.length} saved views.`, 'info');
+  function stopSmoothTourPlayback(): void {
+    if (tourPlaybackRaf !== null) {
+      window.cancelAnimationFrame(tourPlaybackRaf);
+      tourPlaybackRaf = null;
+    }
+  }
+
+  function bookmarkWaypoints() {
+    return cameraBookmarks.map((bm) => ({
+      name: bm.name,
+      lat: bm.lat,
+      lon: bm.lon,
+      alt: bm.alt,
+      heading: bm.heading || 0,
+      pitch: bm.pitch ?? -30,
+      roll: bm.roll || 0,
+    }));
+  }
+
+  function runSmoothTour(generation: number): void {
+    stopSmoothTourPlayback();
+    const waypoints = bookmarkWaypoints();
+    const spline = sampleFlightSpline(waypoints, {
+      fps: 30,
+      speedMps: Math.max(1, wasdSpeedMps),
+      fovyDeg: verticalFovDegForLens(activeLensMm),
+    });
+    const samples = spline.samples;
+    if (samples.length === 0) {
+      flightMode = 'explore';
+      updateFlightModeButtons();
+      showToast('Could not build a fly-through from these bookmarks.', 'error');
+      return;
+    }
+    logEvent(
+      `Starting smooth fly-through across ${waypoints.length} bookmarks (${samples.length} frames, ${spline.segmentCount} ENU segment${spline.segmentCount === 1 ? '' : 's'}).`,
+      'info'
+    );
+    const startMs = performance.now();
+    const canvas = viewer?.scene?.canvas as HTMLCanvasElement | undefined;
+    const tick = (now: number) => {
+      if (generation !== tourGeneration || tourCancelled || flightMode !== 'tour' || !viewer) {
+        stopSmoothTourPlayback();
+        return;
+      }
+      const elapsed = (now - startMs) / 1000;
+      const last = samples[samples.length - 1];
+      if (elapsed > last.t + 1 / spline.fps) {
+        stopSmoothTourPlayback();
+        flightMode = 'explore';
+        updateFlightModeButtons();
+        logEvent('Smooth camera fly-through completed.', 'ok');
+        showToast('Fly-through finished.');
+        return;
+      }
+      let idx = 0;
+      while (idx < samples.length - 1 && samples[idx + 1].t <= elapsed) idx += 1;
+      const sample = samples[idx];
+      if (
+        typeof sample.fovyDeg === 'number' &&
+        Number.isFinite(sample.fovyDeg) &&
+        viewer.camera.frustum &&
+        typeof viewer.camera.frustum.fov === 'number'
+      ) {
+        const w = canvas?.clientWidth || 1280;
+        const h = canvas?.clientHeight || 720;
+        viewer.camera.frustum.fov = computeAppliedFovRad(sample.fovyDeg, w, h);
+      }
+      viewer.camera.setView({
+        destination: Cesium.Cartesian3.fromDegrees(sample.lon, sample.lat, sample.height),
+        orientation: {
+          heading: Cesium.Math.toRadians(sample.heading),
+          pitch: Cesium.Math.toRadians(sample.pitch),
+          roll: Cesium.Math.toRadians(sample.roll),
+        },
+      });
+      tourPlaybackRaf = window.requestAnimationFrame(tick);
+    };
+    tourPlaybackRaf = window.requestAnimationFrame(tick);
+  }
+
+  function exportSmoothFlightPath(): void {
+    if (cameraBookmarks.length === 0) {
+      showToast('Save at least 1 camera bookmark before exporting a fly-through.', 'error');
+      return;
+    }
+    const activeSurvey = getActiveSurvey();
+    const canvas = viewer?.scene?.canvas as HTMLCanvasElement | undefined;
+    const site = (el<HTMLInputElement>('input-site-title')?.value || 'nodrone').trim() || 'nodrone';
+    const bundle = buildFlightExport({
+      site,
+      surveyId: activeSurvey.surveyId,
+      capturedAt: activeSurvey.capturedAt,
+      resolution: [canvas?.width || 1280, canvas?.height || 720],
+      fovyDeg: verticalFovDegForLens(activeLensMm),
+      waypoints: bookmarkWaypoints(),
+      fps: 30,
+      speedMps: Math.max(1, wasdSpeedMps),
+    });
+    const slug = site.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'nodrone';
+    downloadJsonFile(`${slug}-${activeSurvey.surveyId}-camera-path.json`, bundle.cameraPath);
+    window.setTimeout(() => {
+      downloadJsonFile(`${slug}-${activeSurvey.surveyId}-trajectory.json`, bundle.trajectory);
+    }, 350);
+
+    const pathName = `${site} Fly-Through`;
+    activeSurvey.paths = [
+      ...activeSurvey.paths.filter((path) => path.name !== pathName),
+      {
+        pathId: `fly-${activeSurvey.surveyId}-${Date.now().toString(36)}`,
+        name: pathName,
+        format: 'nodrone-camera-path/1',
+        sampleCount: bundle.spline.samples.length,
+        smoothMode: 'catmull-rom',
+      },
+    ];
+    activeSurvey.provenance.updatedAt = new Date().toISOString();
+    surveyCatalogTouched = true;
+    renderSurveyCatalogUI();
+    logEvent(
+      `Exported fly-through camera-path.json and trajectory.json for survey "${activeSurvey.surveyId}" (${bundle.spline.samples.length} frames).`,
+      'ok'
+    );
+    showToast(`Exported fly-through for ${activeSurvey.surveyId}`);
+  }
+
+  function downloadJsonFile(filename: string, payload: unknown): void {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  async function runBookmarkTour(generation: number): Promise<void> {
+    logEvent(`Starting bookmark hop tour across ${cameraBookmarks.length} saved views.`, 'info');
     for (let i = 0; i < cameraBookmarks.length; i++) {
-      if (tourCancelled || flightMode !== 'tour') break;
+      if (tourCancelled || flightMode !== 'tour' || generation !== tourGeneration) break;
       const bm = cameraBookmarks[i];
       await new Promise<void>((resolve) => {
-        if (!viewer || tourCancelled) {
+        if (!viewer || tourCancelled || generation !== tourGeneration) {
           resolve();
           return;
         }
@@ -642,11 +805,11 @@ let cameraPathRemove: (() => void) | null = null;
         });
       });
     }
-    if (!tourCancelled && flightMode === 'tour') {
+    if (!tourCancelled && flightMode === 'tour' && generation === tourGeneration) {
       flightMode = 'explore';
       updateFlightModeButtons();
-      logEvent('Camera bookmark tour completed.', 'ok');
-      showToast('Bookmark tour finished.');
+      logEvent('Camera bookmark hop tour completed.', 'ok');
+      showToast('Bookmark hop tour finished.');
     }
   }
 
@@ -790,9 +953,12 @@ let cameraPathRemove: (() => void) | null = null;
           const slug = pathTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'nodrone';
           const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
           const cv = viewer?.scene?.canvas as HTMLCanvasElement | undefined;
+          const recordedSurvey = getActiveSurvey();
           const pathDoc = {
             schema: 'nodrone-camera-path/1',
             site: pathTitle,
+            surveyId: recordedSurvey.surveyId,
+            capturedAt: recordedSurvey.capturedAt,
             mode: recordingModeLabel,
             recordedAt: new Date().toISOString(),
             canvas: cv ? { width: cv.width, height: cv.height } : null,
@@ -1330,83 +1496,44 @@ let cameraPathRemove: (() => void) | null = null;
         return;
       }
 
-      // Format 4: Native `nodrone-camera-path/1` (`camera-path.json`)
-      if (!raw || raw.schema !== 'nodrone-camera-path/1') {
+      const fallbackSite = el<HTMLInputElement>('input-site-title')?.value || 'nodrone';
+
+      // Format 4: Blender `trajectory.json` (ENU + OpenCV quaternion), stamped with surveyId + origin
+      if (isFlightTrajectoryDocument(raw)) {
+        const parsed = parseFlightTrajectoryDocument(raw, fallbackSite);
+        finalizeLoadedRenderPath(
+          {
+            fileName: file.name,
+            site: parsed.site,
+            fps: parsed.fps,
+            resolution: parsed.resolution,
+            samples: parsed.samples,
+          },
+          'TRAJ',
+          `Loaded trajectory.json "${file.name}" (${parsed.samples.length} frames @ ${parsed.resolution[0]}×${parsed.resolution[1]}, ${parsed.fps} fps${parsed.surveyId ? `, survey ${parsed.surveyId}` : ''}) — flying to Frame 1.`,
+          `Loaded trajectory (${parsed.samples.length} frames) — flying to start`
+        );
+        return;
+      }
+
+      // Format 5: Native `nodrone-camera-path/1` (`camera-path.json`)
+      if (!isFlightCameraPathDocument(raw)) {
         throw new Error(
-          'Unrecognized JSON. Pick camera-path.json, a Google Earth Studio .json, camera_matrices.json, or splatthat-bundle.json.'
+          'Unrecognized JSON. Pick camera-path.json, trajectory.json, a Google Earth Studio .json, camera_matrices.json, or splatthat-bundle.json.'
         );
       }
-      if (!Array.isArray(raw.samples) || raw.samples.length === 0) {
-        throw new Error('Render path contains no samples.');
-      }
-
-      const samples: RenderPathSample[] = [];
-      for (let i = 0; i < raw.samples.length; i++) {
-        const s = raw.samples[i];
-        const lat = Number(s?.lat);
-        const lon = Number(s?.lon);
-        const height = Number(s?.height);
-        const heading = Number(s?.heading ?? 0);
-        const pitch = Number(s?.pitch ?? -35);
-        const roll = Number(s?.roll ?? 0);
-        if (![lat, lon, height, heading, pitch, roll].every((n) => Number.isFinite(n))) {
-          throw new Error(`Sample #${i + 1} has invalid numeric camera coordinates/angles.`);
-        }
-        const fovyRaw = s?.fovyDeg;
-        const fovyDeg =
-          fovyRaw !== null && fovyRaw !== undefined && Number.isFinite(Number(fovyRaw))
-            ? Number(fovyRaw)
-            : null;
-        samples.push({
-          t: Number.isFinite(Number(s?.t)) ? Number(s.t) : undefined,
-          lat,
-          lon,
-          height,
-          heading,
-          pitch,
-          roll,
-          fovyDeg,
-        });
-      }
-
-      let resW = 1920;
-      let resH = 1080;
-      const resSource = raw.render?.resolution ?? raw.resolution;
-      if (Array.isArray(resSource) && resSource.length >= 2) {
-        const w = Math.round(Number(resSource[0]));
-        const h = Math.round(Number(resSource[1]));
-        if (Number.isFinite(w) && Number.isFinite(h) && w >= 64 && h >= 64 && w <= 7680 && h <= 4320) {
-          resW = w;
-          resH = h;
-        }
-      }
-
-      let fps = 30;
-      const fpsSource = raw.render?.fps ?? raw.fps;
-      if (Number.isFinite(Number(fpsSource)) && Number(fpsSource) > 0) {
-        fps = Number(fpsSource);
-      } else if (
-        samples.length >= 2 &&
-        typeof samples[0].t === 'number' &&
-        typeof samples[samples.length - 1].t === 'number'
-      ) {
-        const dt = samples[samples.length - 1].t! - samples[0].t!;
-        if (dt > 0) {
-          fps = Math.max(1, Math.min(120, Math.round((samples.length - 1) / dt)));
-        }
-      }
-
+      const parsed = parseFlightCameraPathDocument(raw, fallbackSite);
       finalizeLoadedRenderPath(
         {
           fileName: file.name,
-          site: String(raw.site || el<HTMLInputElement>('input-site-title')?.value || 'nodrone').trim(),
-          fps,
-          resolution: [resW, resH],
-          samples,
+          site: parsed.site,
+          fps: parsed.fps,
+          resolution: parsed.resolution,
+          samples: parsed.samples,
         },
         '',
-        `Loaded render path "${file.name}" (${samples.length} frames @ ${resW}×${resH}, ${fps} fps) — flying to Frame 1.`,
-        `Path loaded (${samples.length} frames) — flying to start`
+        `Loaded render path "${file.name}" (${parsed.samples.length} frames @ ${parsed.resolution[0]}×${parsed.resolution[1]}, ${parsed.fps} fps${parsed.surveyId ? `, survey ${parsed.surveyId}` : ''}) — flying to Frame 1.`,
+        `Path loaded (${parsed.samples.length} frames) — flying to start`
       );
     } catch (err: any) {
       logEvent(`Render path load failed: ${err?.message || err}`, 'error');
@@ -6432,6 +6559,18 @@ let cameraPathRemove: (() => void) | null = null;
       });
     });
 
+    el<HTMLInputElement>('toggle-tour-hop')?.addEventListener('change', (e) => {
+      tourHopMode = (e.target as HTMLInputElement).checked;
+      if (flightMode === 'tour') {
+        setFlightMode('tour');
+      } else {
+        updateFlightModeButtons();
+      }
+    });
+    el<HTMLButtonElement>('btn-export-flight-path')?.addEventListener('click', () => {
+      exportSmoothFlightPath();
+    });
+
     const sliderSpeed = el<HTMLInputElement>('slider-flight-speed');
     sliderSpeed?.addEventListener('input', () => {
       applyAirspeed(parseInt(sliderSpeed.value, 10));
@@ -6927,6 +7066,8 @@ let cameraPathRemove: (() => void) | null = null;
     'btn-address-search': 'world',
     'btn-fly-coords': 'world',
     'btn-home': 'flight',
+    'toggle-tour-hop': 'flight',
+    'btn-export-flight-path': 'flight',
     'slider-flight-speed': 'flight',
     'slider-orbit-speed': 'flight',
     'btn-rec-free': 'capture',
@@ -7219,7 +7360,9 @@ let cameraPathRemove: (() => void) | null = null;
     }
     if (activeCard === 'flight') {
       return [
-        { id: 'flight-mode-status', label: 'Flight Mode', card: 'flight', value: flightMode },
+        { id: 'flight-mode-status', label: 'Flight Mode', card: 'flight', value: flightMode === 'tour' && !tourHopMode ? 'fly-through' : flightMode },
+        { id: 'toggle-tour-hop', label: 'Hop Between Bookmarks', card: 'flight', active: tourHopMode },
+        { id: 'btn-export-flight-path', label: 'Export Fly-Through', card: 'flight', value: `${cameraBookmarks.length} bookmarks` },
         { id: 'slider-flight-speed', label: 'Airspeed', card: 'flight', value: `${wasdSpeedMps} m/s` },
         { id: 'slider-orbit-speed', label: 'Orbit Rate', card: 'flight', value: `${orbitSpeedDegPerSec} deg/s` },
         { id: 'val-lens-fov', label: '35mm Lens', card: 'flight', value: `${activeLensMm}mm` },
