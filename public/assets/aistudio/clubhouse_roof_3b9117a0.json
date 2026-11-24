@@ -1,0 +1,2674 @@
+{
+ "site": "clubhouse",
+ "schema": "roof.json v0.1",
+ "frame": {
+  "origin": "A1_cupola ground point 35.4690861, -80.10255, 163 m ASL",
+  "axes": "ENU metres, x=East, y=North, z=Up, z=0 at ground",
+  "ground_asl_m": 163,
+  "building_axis_bearing_deg": 109.0,
+  "uv": "u along axis toward the ESE end, v perpendicular toward bearing axis-90\u00b0 (entrance side)"
+ },
+ "source": "manual massing v0 (Claude, 3 Sep 2026) \u2014 hand-modelled from the four hover-read roof-corner anchors, Google Maps nadir imagery (winter 2026, Airbus) and one drone oblique from the NE; NOT a measurement",
+ "method": "Building frame: u along the 109\u00b0 long axis (positive toward the ESE end), v perpendicular toward 19\u00b0 (entrance/roundabout side). End-block corners are pinned exactly to anchors A2, A3, A4, A5 (engine ENU values). Wing positions read from nadir imagery against a 3 m grid (\u00b12 m). Eave height 4.3 m, pitch 8:12 and the cupola heights are visual estimates, not measured. Roof surface inside each mass = min over its sloped edges of (eave + slope \u00d7 inward distance) \u2014 Plumb's synthetic-suite rule; masses are not intersected with each other (no valleys), the real envelope is max over masses.",
+ "quotable": false,
+ "accuracy_note": "Plan: anchored corners \u00b10.5 m; wing edges \u00b12 m; the east block's NE bay and any dormers are omitted. Heights \u00b11 m, pitch \u00b15\u00b0. Use for visualisation, camera-track QA and as the placeholder Plumb replaces; never quote areas or lengths from it.",
+ "anchor_ties": [
+  {
+   "anchor": "A1_cupola",
+   "tie": "cupola base centre; centre mass ridge passes through u=0, v=0"
+  },
+  {
+   "anchor": "A2_roof_W_NW",
+   "tie": "west_end footprint vertex 0 (u -32.25, v -4.56)"
+  },
+  {
+   "anchor": "A3_roof_W_SW",
+   "tie": "west_end footprint vertex 1 (u -28.66, v -13.46)"
+  },
+  {
+   "anchor": "A4_roof_E_NE",
+   "tie": "east_block footprint vertex 2 (u 30.09, v -0.75)"
+  },
+  {
+   "anchor": "A5_roof_E_SE",
+   "tie": "east_block footprint vertex 1 (u 29.74, v -17.55)"
+  }
+ ],
+ "heights": {
+  "eave_min_m_agl": 3.8,
+  "ridge_max_m_agl": 9.9
+ },
+ "features": [
+  {
+   "id": "cupola",
+   "type": "cupola",
+   "footprint_uv": [
+    [
+     -2.0,
+     -2.0
+    ],
+    [
+     2.0,
+     -2.0
+    ],
+    [
+     2.0,
+     2.0
+    ],
+    [
+     -2.0,
+     2.0
+    ]
+   ],
+   "base_m_agl": 8.97,
+   "roof_apex_m_agl": 11.0,
+   "lantern_top_m_agl": 14.5,
+   "note": "square hip-roofed base with dormer + balcony, white lantern above; heights are estimates"
+  }
+ ],
+ "masses": [
+  {
+   "id": "west_end",
+   "note": "west hip end, 9.6 m across, corners = A2/A3; ridge 9 m SSW of the cupola line (stepped composition)",
+   "footprint_uv": [
+    [
+     -32.25,
+     -4.56
+    ],
+    [
+     -28.66,
+     -13.46
+    ],
+    [
+     -22.0,
+     -13.46
+    ],
+    [
+     -22.0,
+     -4.56
+    ]
+   ],
+   "footprint_enu": [
+    [
+     -31.978,
+     6.188,
+     0.0
+    ],
+    [
+     -31.481,
+     -3.396,
+     0.0
+    ],
+    [
+     -25.184,
+     -5.564,
+     0.0
+    ],
+    [
+     -22.286,
+     2.851,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "eave_m": 4.3,
+   "pitch_rise_per_12": 8,
+   "pitch_deg": 33.69,
+   "ridge_m": 7.054,
+   "facet_count": 4
+  },
+  {
+   "id": "west_sw_wing",
+   "note": "west block cross wing toward the lawn (SSW), hipped end \u2014 the lighter, newer-looking planes in the nadir",
+   "footprint_uv": [
+    [
+     -25.0,
+     -17.5
+    ],
+    [
+     -15.0,
+     -17.5
+    ],
+    [
+     -15.0,
+     -6.0
+    ],
+    [
+     -25.0,
+     -6.0
+    ]
+   ],
+   "footprint_enu": [
+    [
+     -29.335,
+     -8.407,
+     0.0
+    ],
+    [
+     -19.88,
+     -11.663,
+     0.0
+    ],
+    [
+     -16.136,
+     -0.79,
+     0.0
+    ],
+    [
+     -25.591,
+     2.466,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "eave_m": 4.3,
+   "pitch_rise_per_12": 8,
+   "pitch_deg": 33.69,
+   "ridge_m": 7.633,
+   "facet_count": 4
+  },
+  {
+   "id": "west_ne_gable",
+   "note": "west block bay toward the drive (NNE), gable end with round window; 3\u20134 m proud of the centre-mass eave",
+   "footprint_uv": [
+    [
+     -20.0,
+     4.0
+    ],
+    [
+     -12.0,
+     4.0
+    ],
+    [
+     -12.0,
+     11.0
+    ],
+    [
+     -20.0,
+     11.0
+    ]
+   ],
+   "footprint_enu": [
+    [
+     -17.608,
+     10.293,
+     0.0
+    ],
+    [
+     -10.044,
+     7.689,
+     0.0
+    ],
+    [
+     -7.765,
+     14.308,
+     0.0
+    ],
+    [
+     -15.329,
+     16.912,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    false,
+    true
+   ],
+   "eave_m": 4.3,
+   "pitch_rise_per_12": 8,
+   "pitch_deg": 33.69,
+   "ridge_m": 6.967,
+   "facet_count": 3
+  },
+  {
+   "id": "center",
+   "note": "central mass carrying the cupola; ridge along the axis through A1; both ends buried in the wings/blocks",
+   "footprint_uv": [
+    [
+     -22.0,
+     -7.0
+    ],
+    [
+     12.0,
+     -7.0
+    ],
+    [
+     12.0,
+     7.0
+    ],
+    [
+     -22.0,
+     7.0
+    ]
+   ],
+   "footprint_enu": [
+    [
+     -23.08,
+     0.544,
+     0.0
+    ],
+    [
+     9.067,
+     -10.525,
+     0.0
+    ],
+    [
+     13.625,
+     2.712,
+     0.0
+    ],
+    [
+     -18.522,
+     13.781,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "eave_m": 4.3,
+   "pitch_rise_per_12": 8,
+   "pitch_deg": 33.69,
+   "ridge_m": 8.967,
+   "facet_count": 4
+  },
+  {
+   "id": "east_block",
+   "note": "east block, 16.8 m across, corners = A4/A5, hipped east end; the flat HVAC service roof beyond it is not modelled",
+   "footprint_uv": [
+    [
+     8.0,
+     -17.55
+    ],
+    [
+     29.74,
+     -17.55
+    ],
+    [
+     30.09,
+     -0.75
+    ],
+    [
+     8.0,
+     -0.75
+    ]
+   ],
+   "footprint_enu": [
+    [
+     1.85,
+     -19.198,
+     0.0
+    ],
+    [
+     22.406,
+     -26.276,
+     0.0
+    ],
+    [
+     28.206,
+     -10.505,
+     0.0
+    ],
+    [
+     7.32,
+     -3.314,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "eave_m": 4.3,
+   "pitch_rise_per_12": 8,
+   "pitch_deg": 33.69,
+   "ridge_m": 9.9,
+   "facet_count": 4
+  },
+  {
+   "id": "east_sw_wing",
+   "note": "east block cross wing toward the lawn (SSW), hipped end, chimney box on its SE-facing plane",
+   "footprint_uv": [
+    [
+     12.0,
+     -24.0
+    ],
+    [
+     21.0,
+     -24.0
+    ],
+    [
+     21.0,
+     -12.0
+    ],
+    [
+     12.0,
+     -12.0
+    ]
+   ],
+   "footprint_enu": [
+    [
+     3.533,
+     -26.599,
+     0.0
+    ],
+    [
+     12.042,
+     -29.529,
+     0.0
+    ],
+    [
+     15.949,
+     -18.183,
+     0.0
+    ],
+    [
+     7.439,
+     -15.253,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "eave_m": 4.3,
+   "pitch_rise_per_12": 8,
+   "pitch_deg": 33.69,
+   "ridge_m": 7.3,
+   "facet_count": 4
+  },
+  {
+   "id": "porte_cochere",
+   "note": "entrance canopy toward the roundabout (NNE), gable end with round window, open sides; cars park beneath",
+   "footprint_uv": [
+    [
+     -4.0,
+     6.0
+    ],
+    [
+     4.0,
+     6.0
+    ],
+    [
+     4.0,
+     20.0
+    ],
+    [
+     -4.0,
+     20.0
+    ]
+   ],
+   "footprint_enu": [
+    [
+     -1.829,
+     6.975,
+     0.0
+    ],
+    [
+     5.735,
+     4.371,
+     0.0
+    ],
+    [
+     10.293,
+     17.608,
+     0.0
+    ],
+    [
+     2.729,
+     20.213,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    false,
+    true
+   ],
+   "eave_m": 4.3,
+   "pitch_rise_per_12": 8,
+   "pitch_deg": 33.69,
+   "ridge_m": 6.967,
+   "facet_count": 3
+  },
+  {
+   "id": "sw_pavilion",
+   "note": "lawn-side pavilion SSW of the cupola, low hip (flat-topped in reality), brick terrace both sides",
+   "footprint_uv": [
+    [
+     -4.0,
+     -17.0
+    ],
+    [
+     4.0,
+     -17.0
+    ],
+    [
+     4.0,
+     -9.0
+    ],
+    [
+     -4.0,
+     -9.0
+    ]
+   ],
+   "footprint_enu": [
+    [
+     -9.317,
+     -14.772,
+     0.0
+    ],
+    [
+     -1.753,
+     -17.376,
+     0.0
+    ],
+    [
+     0.852,
+     -9.812,
+     0.0
+    ],
+    [
+     -6.712,
+     -7.207,
+     0.0
+    ]
+   ],
+   "sloped_edges": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "eave_m": 3.8,
+   "pitch_rise_per_12": 6,
+   "pitch_deg": 26.57,
+   "ridge_m": 5.8,
+   "facet_count": 4
+  }
+ ],
+ "facets": [
+  {
+   "id": "west_end:0",
+   "mass": "west_end",
+   "polygon_enu": [
+    [
+     -31.978,
+     6.188,
+     4.3
+    ],
+    [
+     -31.481,
+     -3.396,
+     4.3
+    ],
+    [
+     -27.649,
+     -0.51,
+     6.951
+    ],
+    [
+     -27.536,
+     0.29,
+     7.054
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 267.0,
+   "plan_area_m2": 21.19,
+   "area_m2": 25.47,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_end:1",
+   "mass": "west_end",
+   "polygon_enu": [
+    [
+     -31.481,
+     -3.396,
+     4.3
+    ],
+    [
+     -25.184,
+     -5.564,
+     4.3
+    ],
+    [
+     -27.649,
+     -0.51,
+     6.951
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 13.24,
+   "area_m2": 15.91,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_end:2",
+   "mass": "west_end",
+   "polygon_enu": [
+    [
+     -25.184,
+     -5.564,
+     4.3
+    ],
+    [
+     -22.286,
+     2.851,
+     4.3
+    ],
+    [
+     -27.536,
+     0.29,
+     7.054
+    ],
+    [
+     -27.649,
+     -0.51,
+     6.951
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 109.0,
+   "plan_area_m2": 19.65,
+   "area_m2": 23.62,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_end:3",
+   "mass": "west_end",
+   "polygon_enu": [
+    [
+     -31.978,
+     6.188,
+     4.3
+    ],
+    [
+     -27.536,
+     0.29,
+     7.054
+    ],
+    [
+     -22.286,
+     2.851,
+     4.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 19.0,
+   "plan_area_m2": 21.17,
+   "area_m2": 25.44,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_sw_wing:0",
+   "mass": "west_sw_wing",
+   "polygon_enu": [
+    [
+     -29.335,
+     -8.407,
+     4.3
+    ],
+    [
+     -19.88,
+     -11.663,
+     4.3
+    ],
+    [
+     -22.98,
+     -5.308,
+     7.633
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 25.0,
+   "area_m2": 30.05,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_sw_wing:1",
+   "mass": "west_sw_wing",
+   "polygon_enu": [
+    [
+     -19.88,
+     -11.663,
+     4.3
+    ],
+    [
+     -16.136,
+     -0.79,
+     4.3
+    ],
+    [
+     -22.492,
+     -3.889,
+     7.633
+    ],
+    [
+     -22.98,
+     -5.308,
+     7.633
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 109.0,
+   "plan_area_m2": 32.5,
+   "area_m2": 39.06,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_sw_wing:2",
+   "mass": "west_sw_wing",
+   "polygon_enu": [
+    [
+     -16.136,
+     -0.79,
+     4.3
+    ],
+    [
+     -25.591,
+     2.466,
+     4.3
+    ],
+    [
+     -22.492,
+     -3.889,
+     7.633
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 19.0,
+   "plan_area_m2": 25.0,
+   "area_m2": 30.05,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_sw_wing:3",
+   "mass": "west_sw_wing",
+   "polygon_enu": [
+    [
+     -29.335,
+     -8.407,
+     4.3
+    ],
+    [
+     -22.98,
+     -5.308,
+     7.633
+    ],
+    [
+     -22.492,
+     -3.889,
+     7.633
+    ],
+    [
+     -25.591,
+     2.466,
+     4.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 289.0,
+   "plan_area_m2": 32.5,
+   "area_m2": 39.06,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_ne_gable:0",
+   "mass": "west_ne_gable",
+   "polygon_enu": [
+    [
+     -17.608,
+     10.293,
+     4.3
+    ],
+    [
+     -10.044,
+     7.689,
+     4.3
+    ],
+    [
+     -12.524,
+     12.773,
+     6.967
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 16.0,
+   "area_m2": 19.23,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_ne_gable:1",
+   "mass": "west_ne_gable",
+   "polygon_enu": [
+    [
+     -10.044,
+     7.689,
+     4.3
+    ],
+    [
+     -7.765,
+     14.308,
+     4.3
+    ],
+    [
+     -11.547,
+     15.61,
+     6.967
+    ],
+    [
+     -12.524,
+     12.773,
+     6.967
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 109.0,
+   "plan_area_m2": 20.0,
+   "area_m2": 24.04,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "west_ne_gable:3",
+   "mass": "west_ne_gable",
+   "polygon_enu": [
+    [
+     -17.608,
+     10.293,
+     4.3
+    ],
+    [
+     -12.524,
+     12.773,
+     6.967
+    ],
+    [
+     -11.547,
+     15.61,
+     6.967
+    ],
+    [
+     -15.329,
+     16.912,
+     4.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 289.0,
+   "plan_area_m2": 20.0,
+   "area_m2": 24.04,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "center:0",
+   "mass": "center",
+   "polygon_enu": [
+    [
+     -23.08,
+     0.544,
+     4.3
+    ],
+    [
+     9.067,
+     -10.525,
+     4.3
+    ],
+    [
+     4.728,
+     -1.628,
+     8.967
+    ],
+    [
+     -14.183,
+     4.884,
+     8.967
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 189.0,
+   "area_m2": 227.15,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "center:1",
+   "mass": "center",
+   "polygon_enu": [
+    [
+     9.067,
+     -10.525,
+     4.3
+    ],
+    [
+     13.625,
+     2.712,
+     4.3
+    ],
+    [
+     4.728,
+     -1.628,
+     8.967
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 109.0,
+   "plan_area_m2": 49.0,
+   "area_m2": 58.89,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "center:2",
+   "mass": "center",
+   "polygon_enu": [
+    [
+     13.625,
+     2.712,
+     4.3
+    ],
+    [
+     -18.522,
+     13.781,
+     4.3
+    ],
+    [
+     -14.183,
+     4.884,
+     8.967
+    ],
+    [
+     4.728,
+     -1.628,
+     8.967
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 19.0,
+   "plan_area_m2": 189.0,
+   "area_m2": 227.15,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "center:3",
+   "mass": "center",
+   "polygon_enu": [
+    [
+     -23.08,
+     0.544,
+     4.3
+    ],
+    [
+     -14.183,
+     4.884,
+     8.967
+    ],
+    [
+     -18.522,
+     13.781,
+     4.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 289.0,
+   "plan_area_m2": 49.0,
+   "area_m2": 58.89,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_block:0",
+   "mass": "east_block",
+   "polygon_enu": [
+    [
+     1.85,
+     -19.198,
+     4.3
+    ],
+    [
+     22.406,
+     -26.276,
+     4.3
+    ],
+    [
+     17.362,
+     -15.656,
+     9.9
+    ],
+    [
+     12.528,
+     -13.991,
+     9.9
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 112.78,
+   "area_m2": 135.55,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_block:1",
+   "mass": "east_block",
+   "polygon_enu": [
+    [
+     22.406,
+     -26.276,
+     4.3
+    ],
+    [
+     28.206,
+     -10.505,
+     4.3
+    ],
+    [
+     17.362,
+     -15.656,
+     9.9
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 110.2,
+   "plan_area_m2": 70.58,
+   "area_m2": 84.82,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_block:2",
+   "mass": "east_block",
+   "polygon_enu": [
+    [
+     28.206,
+     -10.505,
+     4.3
+    ],
+    [
+     7.32,
+     -3.314,
+     4.3
+    ],
+    [
+     12.528,
+     -13.991,
+     9.9
+    ],
+    [
+     17.362,
+     -15.656,
+     9.9
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 19.0,
+   "plan_area_m2": 114.25,
+   "area_m2": 137.32,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_block:3",
+   "mass": "east_block",
+   "polygon_enu": [
+    [
+     1.85,
+     -19.198,
+     4.3
+    ],
+    [
+     12.528,
+     -13.991,
+     9.9
+    ],
+    [
+     7.32,
+     -3.314,
+     4.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 289.0,
+   "plan_area_m2": 70.56,
+   "area_m2": 84.8,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_sw_wing:0",
+   "mass": "east_sw_wing",
+   "polygon_enu": [
+    [
+     3.533,
+     -26.599,
+     4.3
+    ],
+    [
+     12.042,
+     -29.529,
+     4.3
+    ],
+    [
+     9.252,
+     -23.809,
+     7.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 20.25,
+   "area_m2": 24.34,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_sw_wing:1",
+   "mass": "east_sw_wing",
+   "polygon_enu": [
+    [
+     12.042,
+     -29.529,
+     4.3
+    ],
+    [
+     15.949,
+     -18.183,
+     4.3
+    ],
+    [
+     10.229,
+     -20.973,
+     7.3
+    ],
+    [
+     9.252,
+     -23.809,
+     7.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 109.0,
+   "plan_area_m2": 33.75,
+   "area_m2": 40.56,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_sw_wing:2",
+   "mass": "east_sw_wing",
+   "polygon_enu": [
+    [
+     15.949,
+     -18.183,
+     4.3
+    ],
+    [
+     7.439,
+     -15.253,
+     4.3
+    ],
+    [
+     10.229,
+     -20.973,
+     7.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 19.0,
+   "plan_area_m2": 20.25,
+   "area_m2": 24.34,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "east_sw_wing:3",
+   "mass": "east_sw_wing",
+   "polygon_enu": [
+    [
+     3.533,
+     -26.599,
+     4.3
+    ],
+    [
+     9.252,
+     -23.809,
+     7.3
+    ],
+    [
+     10.229,
+     -20.973,
+     7.3
+    ],
+    [
+     7.439,
+     -15.253,
+     4.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 289.0,
+   "plan_area_m2": 33.75,
+   "area_m2": 40.56,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "porte_cochere:0",
+   "mass": "porte_cochere",
+   "polygon_enu": [
+    [
+     -1.829,
+     6.975,
+     4.3
+    ],
+    [
+     5.735,
+     4.371,
+     4.3
+    ],
+    [
+     3.256,
+     9.455,
+     6.967
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 16.0,
+   "area_m2": 19.23,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "porte_cochere:1",
+   "mass": "porte_cochere",
+   "polygon_enu": [
+    [
+     5.735,
+     4.371,
+     4.3
+    ],
+    [
+     10.293,
+     17.608,
+     4.3
+    ],
+    [
+     6.511,
+     18.91,
+     6.967
+    ],
+    [
+     3.256,
+     9.455,
+     6.967
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 109.0,
+   "plan_area_m2": 48.0,
+   "area_m2": 57.69,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "porte_cochere:3",
+   "mass": "porte_cochere",
+   "polygon_enu": [
+    [
+     -1.829,
+     6.975,
+     4.3
+    ],
+    [
+     3.256,
+     9.455,
+     6.967
+    ],
+    [
+     6.511,
+     18.91,
+     6.967
+    ],
+    [
+     2.729,
+     20.213,
+     4.3
+    ]
+   ],
+   "pitch_deg": 33.69,
+   "pitch_rise_per_12": 8,
+   "aspect_deg": 289.0,
+   "plan_area_m2": 48.0,
+   "area_m2": 57.69,
+   "eave_m": 4.3,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "sw_pavilion:0",
+   "mass": "sw_pavilion",
+   "polygon_enu": [
+    [
+     -9.317,
+     -14.772,
+     3.8
+    ],
+    [
+     -1.753,
+     -17.376,
+     3.8
+    ],
+    [
+     -4.232,
+     -12.292,
+     5.8
+    ]
+   ],
+   "pitch_deg": 26.57,
+   "pitch_rise_per_12": 6,
+   "aspect_deg": 199.0,
+   "plan_area_m2": 16.0,
+   "area_m2": 17.89,
+   "eave_m": 3.8,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "sw_pavilion:1",
+   "mass": "sw_pavilion",
+   "polygon_enu": [
+    [
+     -1.753,
+     -17.376,
+     3.8
+    ],
+    [
+     0.852,
+     -9.812,
+     3.8
+    ],
+    [
+     -4.232,
+     -12.292,
+     5.8
+    ]
+   ],
+   "pitch_deg": 26.57,
+   "pitch_rise_per_12": 6,
+   "aspect_deg": 109.0,
+   "plan_area_m2": 16.0,
+   "area_m2": 17.89,
+   "eave_m": 3.8,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "sw_pavilion:2",
+   "mass": "sw_pavilion",
+   "polygon_enu": [
+    [
+     0.852,
+     -9.812,
+     3.8
+    ],
+    [
+     -6.712,
+     -7.207,
+     3.8
+    ],
+    [
+     -4.232,
+     -12.292,
+     5.8
+    ]
+   ],
+   "pitch_deg": 26.57,
+   "pitch_rise_per_12": 6,
+   "aspect_deg": 19.0,
+   "plan_area_m2": 16.0,
+   "area_m2": 17.89,
+   "eave_m": 3.8,
+   "clipped_by_other_masses": false
+  },
+  {
+   "id": "sw_pavilion:3",
+   "mass": "sw_pavilion",
+   "polygon_enu": [
+    [
+     -9.317,
+     -14.772,
+     3.8
+    ],
+    [
+     -4.232,
+     -12.292,
+     5.8
+    ],
+    [
+     -6.712,
+     -7.207,
+     3.8
+    ]
+   ],
+   "pitch_deg": 26.57,
+   "pitch_rise_per_12": 6,
+   "aspect_deg": 289.0,
+   "plan_area_m2": 16.0,
+   "area_m2": 17.89,
+   "eave_m": 3.8,
+   "clipped_by_other_masses": false
+  }
+ ],
+ "edges": [
+  {
+   "id": "E1",
+   "type": "eave",
+   "mass": "west_end",
+   "a_enu": [
+    -31.978,
+    6.188,
+    4.3
+   ],
+   "b_enu": [
+    -31.481,
+    -3.396,
+    4.3
+   ],
+   "length_m": 9.597,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H2",
+   "type": "hip",
+   "mass": "west_end",
+   "a_enu": [
+    -31.481,
+    -3.396,
+    4.3
+   ],
+   "b_enu": [
+    -27.649,
+    -0.51,
+    6.951
+   ],
+   "length_m": 5.481,
+   "z_min_m": 4.3,
+   "z_max_m": 6.951
+  },
+  {
+   "id": "H3",
+   "type": "hip",
+   "mass": "west_end",
+   "a_enu": [
+    -27.649,
+    -0.51,
+    6.951
+   ],
+   "b_enu": [
+    -27.536,
+    0.29,
+    7.054
+   ],
+   "length_m": 0.815,
+   "z_min_m": 6.951,
+   "z_max_m": 7.054
+  },
+  {
+   "id": "H4",
+   "type": "hip",
+   "mass": "west_end",
+   "a_enu": [
+    -27.536,
+    0.29,
+    7.054
+   ],
+   "b_enu": [
+    -31.978,
+    6.188,
+    4.3
+   ],
+   "length_m": 7.88,
+   "z_min_m": 4.3,
+   "z_max_m": 7.054
+  },
+  {
+   "id": "E5",
+   "type": "eave",
+   "mass": "west_end",
+   "a_enu": [
+    -31.481,
+    -3.396,
+    4.3
+   ],
+   "b_enu": [
+    -25.184,
+    -5.564,
+    4.3
+   ],
+   "length_m": 6.66,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H6",
+   "type": "hip",
+   "mass": "west_end",
+   "a_enu": [
+    -25.184,
+    -5.564,
+    4.3
+   ],
+   "b_enu": [
+    -27.649,
+    -0.51,
+    6.951
+   ],
+   "length_m": 6.217,
+   "z_min_m": 4.3,
+   "z_max_m": 6.951
+  },
+  {
+   "id": "E7",
+   "type": "eave",
+   "mass": "west_end",
+   "a_enu": [
+    -25.184,
+    -5.564,
+    4.3
+   ],
+   "b_enu": [
+    -22.286,
+    2.851,
+    4.3
+   ],
+   "length_m": 8.9,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H8",
+   "type": "hip",
+   "mass": "west_end",
+   "a_enu": [
+    -22.286,
+    2.851,
+    4.3
+   ],
+   "b_enu": [
+    -27.536,
+    0.29,
+    7.054
+   ],
+   "length_m": 6.458,
+   "z_min_m": 4.3,
+   "z_max_m": 7.054
+  },
+  {
+   "id": "E9",
+   "type": "eave",
+   "mass": "west_end",
+   "a_enu": [
+    -22.286,
+    2.851,
+    4.3
+   ],
+   "b_enu": [
+    -31.978,
+    6.188,
+    4.3
+   ],
+   "length_m": 10.25,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "E10",
+   "type": "eave",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -29.335,
+    -8.407,
+    4.3
+   ],
+   "b_enu": [
+    -19.88,
+    -11.663,
+    4.3
+   ],
+   "length_m": 10.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H11",
+   "type": "hip",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -19.88,
+    -11.663,
+    4.3
+   ],
+   "b_enu": [
+    -22.98,
+    -5.308,
+    7.633
+   ],
+   "length_m": 7.817,
+   "z_min_m": 4.3,
+   "z_max_m": 7.633
+  },
+  {
+   "id": "H12",
+   "type": "hip",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -22.98,
+    -5.308,
+    7.633
+   ],
+   "b_enu": [
+    -29.335,
+    -8.407,
+    4.3
+   ],
+   "length_m": 7.817,
+   "z_min_m": 4.3,
+   "z_max_m": 7.633
+  },
+  {
+   "id": "E13",
+   "type": "eave",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -19.88,
+    -11.663,
+    4.3
+   ],
+   "b_enu": [
+    -16.136,
+    -0.79,
+    4.3
+   ],
+   "length_m": 11.5,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H14",
+   "type": "hip",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -16.136,
+    -0.79,
+    4.3
+   ],
+   "b_enu": [
+    -22.492,
+    -3.889,
+    7.633
+   ],
+   "length_m": 7.817,
+   "z_min_m": 4.3,
+   "z_max_m": 7.633
+  },
+  {
+   "id": "R15",
+   "type": "ridge",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -22.492,
+    -3.889,
+    7.633
+   ],
+   "b_enu": [
+    -22.98,
+    -5.308,
+    7.633
+   ],
+   "length_m": 1.5,
+   "z_min_m": 7.633,
+   "z_max_m": 7.633
+  },
+  {
+   "id": "E16",
+   "type": "eave",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -16.136,
+    -0.79,
+    4.3
+   ],
+   "b_enu": [
+    -25.591,
+    2.466,
+    4.3
+   ],
+   "length_m": 10.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H17",
+   "type": "hip",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -25.591,
+    2.466,
+    4.3
+   ],
+   "b_enu": [
+    -22.492,
+    -3.889,
+    7.633
+   ],
+   "length_m": 7.817,
+   "z_min_m": 4.3,
+   "z_max_m": 7.633
+  },
+  {
+   "id": "E18",
+   "type": "eave",
+   "mass": "west_sw_wing",
+   "a_enu": [
+    -25.591,
+    2.466,
+    4.3
+   ],
+   "b_enu": [
+    -29.335,
+    -8.407,
+    4.3
+   ],
+   "length_m": 11.5,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "E19",
+   "type": "eave",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -17.608,
+    10.293,
+    4.3
+   ],
+   "b_enu": [
+    -10.044,
+    7.689,
+    4.3
+   ],
+   "length_m": 8.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H20",
+   "type": "hip",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -10.044,
+    7.689,
+    4.3
+   ],
+   "b_enu": [
+    -12.524,
+    12.773,
+    6.967
+   ],
+   "length_m": 6.254,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "H21",
+   "type": "hip",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -12.524,
+    12.773,
+    6.967
+   ],
+   "b_enu": [
+    -17.608,
+    10.293,
+    4.3
+   ],
+   "length_m": 6.254,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "E22",
+   "type": "eave",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -10.044,
+    7.689,
+    4.3
+   ],
+   "b_enu": [
+    -7.765,
+    14.308,
+    4.3
+   ],
+   "length_m": 7.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "R23",
+   "type": "rake",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -7.765,
+    14.308,
+    4.3
+   ],
+   "b_enu": [
+    -11.547,
+    15.61,
+    6.967
+   ],
+   "length_m": 4.807,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "R24",
+   "type": "ridge",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -11.547,
+    15.61,
+    6.967
+   ],
+   "b_enu": [
+    -12.524,
+    12.773,
+    6.967
+   ],
+   "length_m": 3.0,
+   "z_min_m": 6.967,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "R25",
+   "type": "rake",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -11.547,
+    15.61,
+    6.967
+   ],
+   "b_enu": [
+    -15.329,
+    16.912,
+    4.3
+   ],
+   "length_m": 4.807,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "E26",
+   "type": "eave",
+   "mass": "west_ne_gable",
+   "a_enu": [
+    -15.329,
+    16.912,
+    4.3
+   ],
+   "b_enu": [
+    -17.608,
+    10.293,
+    4.3
+   ],
+   "length_m": 7.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "E27",
+   "type": "eave",
+   "mass": "center",
+   "a_enu": [
+    -23.08,
+    0.544,
+    4.3
+   ],
+   "b_enu": [
+    9.067,
+    -10.525,
+    4.3
+   ],
+   "length_m": 34.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H28",
+   "type": "hip",
+   "mass": "center",
+   "a_enu": [
+    9.067,
+    -10.525,
+    4.3
+   ],
+   "b_enu": [
+    4.728,
+    -1.628,
+    8.967
+   ],
+   "length_m": 10.944,
+   "z_min_m": 4.3,
+   "z_max_m": 8.967
+  },
+  {
+   "id": "R29",
+   "type": "ridge",
+   "mass": "center",
+   "a_enu": [
+    4.728,
+    -1.628,
+    8.967
+   ],
+   "b_enu": [
+    -14.183,
+    4.884,
+    8.967
+   ],
+   "length_m": 20.0,
+   "z_min_m": 8.967,
+   "z_max_m": 8.967
+  },
+  {
+   "id": "H30",
+   "type": "hip",
+   "mass": "center",
+   "a_enu": [
+    -14.183,
+    4.884,
+    8.967
+   ],
+   "b_enu": [
+    -23.08,
+    0.544,
+    4.3
+   ],
+   "length_m": 10.944,
+   "z_min_m": 4.3,
+   "z_max_m": 8.967
+  },
+  {
+   "id": "E31",
+   "type": "eave",
+   "mass": "center",
+   "a_enu": [
+    9.067,
+    -10.525,
+    4.3
+   ],
+   "b_enu": [
+    13.625,
+    2.712,
+    4.3
+   ],
+   "length_m": 14.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H32",
+   "type": "hip",
+   "mass": "center",
+   "a_enu": [
+    13.625,
+    2.712,
+    4.3
+   ],
+   "b_enu": [
+    4.728,
+    -1.628,
+    8.967
+   ],
+   "length_m": 10.944,
+   "z_min_m": 4.3,
+   "z_max_m": 8.967
+  },
+  {
+   "id": "E33",
+   "type": "eave",
+   "mass": "center",
+   "a_enu": [
+    13.625,
+    2.712,
+    4.3
+   ],
+   "b_enu": [
+    -18.522,
+    13.781,
+    4.3
+   ],
+   "length_m": 34.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H34",
+   "type": "hip",
+   "mass": "center",
+   "a_enu": [
+    -18.522,
+    13.781,
+    4.3
+   ],
+   "b_enu": [
+    -14.183,
+    4.884,
+    8.967
+   ],
+   "length_m": 10.944,
+   "z_min_m": 4.3,
+   "z_max_m": 8.967
+  },
+  {
+   "id": "E35",
+   "type": "eave",
+   "mass": "center",
+   "a_enu": [
+    -18.522,
+    13.781,
+    4.3
+   ],
+   "b_enu": [
+    -23.08,
+    0.544,
+    4.3
+   ],
+   "length_m": 14.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "E36",
+   "type": "eave",
+   "mass": "east_block",
+   "a_enu": [
+    1.85,
+    -19.198,
+    4.3
+   ],
+   "b_enu": [
+    22.406,
+    -26.276,
+    4.3
+   ],
+   "length_m": 21.74,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H37",
+   "type": "hip",
+   "mass": "east_block",
+   "a_enu": [
+    22.406,
+    -26.276,
+    4.3
+   ],
+   "b_enu": [
+    17.362,
+    -15.656,
+    9.9
+   ],
+   "length_m": 13.023,
+   "z_min_m": 4.3,
+   "z_max_m": 9.9
+  },
+  {
+   "id": "R38",
+   "type": "ridge",
+   "mass": "east_block",
+   "a_enu": [
+    17.362,
+    -15.656,
+    9.9
+   ],
+   "b_enu": [
+    12.528,
+    -13.991,
+    9.9
+   ],
+   "length_m": 5.113,
+   "z_min_m": 9.9,
+   "z_max_m": 9.9
+  },
+  {
+   "id": "H39",
+   "type": "hip",
+   "mass": "east_block",
+   "a_enu": [
+    12.528,
+    -13.991,
+    9.9
+   ],
+   "b_enu": [
+    1.85,
+    -19.198,
+    4.3
+   ],
+   "length_m": 13.133,
+   "z_min_m": 4.3,
+   "z_max_m": 9.9
+  },
+  {
+   "id": "E40",
+   "type": "eave",
+   "mass": "east_block",
+   "a_enu": [
+    22.406,
+    -26.276,
+    4.3
+   ],
+   "b_enu": [
+    28.206,
+    -10.505,
+    4.3
+   ],
+   "length_m": 16.804,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H41",
+   "type": "hip",
+   "mass": "east_block",
+   "a_enu": [
+    28.206,
+    -10.505,
+    4.3
+   ],
+   "b_enu": [
+    17.362,
+    -15.656,
+    9.9
+   ],
+   "length_m": 13.247,
+   "z_min_m": 4.3,
+   "z_max_m": 9.9
+  },
+  {
+   "id": "E42",
+   "type": "eave",
+   "mass": "east_block",
+   "a_enu": [
+    28.206,
+    -10.505,
+    4.3
+   ],
+   "b_enu": [
+    7.32,
+    -3.314,
+    4.3
+   ],
+   "length_m": 22.09,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H43",
+   "type": "hip",
+   "mass": "east_block",
+   "a_enu": [
+    7.32,
+    -3.314,
+    4.3
+   ],
+   "b_enu": [
+    12.528,
+    -13.991,
+    9.9
+   ],
+   "length_m": 13.133,
+   "z_min_m": 4.3,
+   "z_max_m": 9.9
+  },
+  {
+   "id": "E44",
+   "type": "eave",
+   "mass": "east_block",
+   "a_enu": [
+    7.32,
+    -3.314,
+    4.3
+   ],
+   "b_enu": [
+    1.85,
+    -19.198,
+    4.3
+   ],
+   "length_m": 16.8,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "E45",
+   "type": "eave",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    3.533,
+    -26.599,
+    4.3
+   ],
+   "b_enu": [
+    12.042,
+    -29.529,
+    4.3
+   ],
+   "length_m": 9.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H46",
+   "type": "hip",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    12.042,
+    -29.529,
+    4.3
+   ],
+   "b_enu": [
+    9.252,
+    -23.809,
+    7.3
+   ],
+   "length_m": 7.036,
+   "z_min_m": 4.3,
+   "z_max_m": 7.3
+  },
+  {
+   "id": "H47",
+   "type": "hip",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    9.252,
+    -23.809,
+    7.3
+   ],
+   "b_enu": [
+    3.533,
+    -26.599,
+    4.3
+   ],
+   "length_m": 7.036,
+   "z_min_m": 4.3,
+   "z_max_m": 7.3
+  },
+  {
+   "id": "E48",
+   "type": "eave",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    12.042,
+    -29.529,
+    4.3
+   ],
+   "b_enu": [
+    15.949,
+    -18.183,
+    4.3
+   ],
+   "length_m": 12.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H49",
+   "type": "hip",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    15.949,
+    -18.183,
+    4.3
+   ],
+   "b_enu": [
+    10.229,
+    -20.973,
+    7.3
+   ],
+   "length_m": 7.036,
+   "z_min_m": 4.3,
+   "z_max_m": 7.3
+  },
+  {
+   "id": "R50",
+   "type": "ridge",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    10.229,
+    -20.973,
+    7.3
+   ],
+   "b_enu": [
+    9.252,
+    -23.809,
+    7.3
+   ],
+   "length_m": 3.0,
+   "z_min_m": 7.3,
+   "z_max_m": 7.3
+  },
+  {
+   "id": "E51",
+   "type": "eave",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    15.949,
+    -18.183,
+    4.3
+   ],
+   "b_enu": [
+    7.439,
+    -15.253,
+    4.3
+   ],
+   "length_m": 9.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H52",
+   "type": "hip",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    7.439,
+    -15.253,
+    4.3
+   ],
+   "b_enu": [
+    10.229,
+    -20.973,
+    7.3
+   ],
+   "length_m": 7.036,
+   "z_min_m": 4.3,
+   "z_max_m": 7.3
+  },
+  {
+   "id": "E53",
+   "type": "eave",
+   "mass": "east_sw_wing",
+   "a_enu": [
+    7.439,
+    -15.253,
+    4.3
+   ],
+   "b_enu": [
+    3.533,
+    -26.599,
+    4.3
+   ],
+   "length_m": 12.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "E54",
+   "type": "eave",
+   "mass": "porte_cochere",
+   "a_enu": [
+    -1.829,
+    6.975,
+    4.3
+   ],
+   "b_enu": [
+    5.735,
+    4.371,
+    4.3
+   ],
+   "length_m": 8.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "H55",
+   "type": "hip",
+   "mass": "porte_cochere",
+   "a_enu": [
+    5.735,
+    4.371,
+    4.3
+   ],
+   "b_enu": [
+    3.256,
+    9.455,
+    6.967
+   ],
+   "length_m": 6.254,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "H56",
+   "type": "hip",
+   "mass": "porte_cochere",
+   "a_enu": [
+    3.256,
+    9.455,
+    6.967
+   ],
+   "b_enu": [
+    -1.829,
+    6.975,
+    4.3
+   ],
+   "length_m": 6.254,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "E57",
+   "type": "eave",
+   "mass": "porte_cochere",
+   "a_enu": [
+    5.735,
+    4.371,
+    4.3
+   ],
+   "b_enu": [
+    10.293,
+    17.608,
+    4.3
+   ],
+   "length_m": 14.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "R58",
+   "type": "rake",
+   "mass": "porte_cochere",
+   "a_enu": [
+    10.293,
+    17.608,
+    4.3
+   ],
+   "b_enu": [
+    6.511,
+    18.91,
+    6.967
+   ],
+   "length_m": 4.807,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "R59",
+   "type": "ridge",
+   "mass": "porte_cochere",
+   "a_enu": [
+    6.511,
+    18.91,
+    6.967
+   ],
+   "b_enu": [
+    3.256,
+    9.455,
+    6.967
+   ],
+   "length_m": 10.0,
+   "z_min_m": 6.967,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "R60",
+   "type": "rake",
+   "mass": "porte_cochere",
+   "a_enu": [
+    6.511,
+    18.91,
+    6.967
+   ],
+   "b_enu": [
+    2.729,
+    20.213,
+    4.3
+   ],
+   "length_m": 4.807,
+   "z_min_m": 4.3,
+   "z_max_m": 6.967
+  },
+  {
+   "id": "E61",
+   "type": "eave",
+   "mass": "porte_cochere",
+   "a_enu": [
+    2.729,
+    20.213,
+    4.3
+   ],
+   "b_enu": [
+    -1.829,
+    6.975,
+    4.3
+   ],
+   "length_m": 14.0,
+   "z_min_m": 4.3,
+   "z_max_m": 4.3
+  },
+  {
+   "id": "E62",
+   "type": "eave",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    -9.317,
+    -14.772,
+    3.8
+   ],
+   "b_enu": [
+    -1.753,
+    -17.376,
+    3.8
+   ],
+   "length_m": 8.0,
+   "z_min_m": 3.8,
+   "z_max_m": 3.8
+  },
+  {
+   "id": "H63",
+   "type": "hip",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    -1.753,
+    -17.376,
+    3.8
+   ],
+   "b_enu": [
+    -4.232,
+    -12.292,
+    5.8
+   ],
+   "length_m": 6.0,
+   "z_min_m": 3.8,
+   "z_max_m": 5.8
+  },
+  {
+   "id": "H64",
+   "type": "hip",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    -4.232,
+    -12.292,
+    5.8
+   ],
+   "b_enu": [
+    -9.317,
+    -14.772,
+    3.8
+   ],
+   "length_m": 6.0,
+   "z_min_m": 3.8,
+   "z_max_m": 5.8
+  },
+  {
+   "id": "E65",
+   "type": "eave",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    -1.753,
+    -17.376,
+    3.8
+   ],
+   "b_enu": [
+    0.852,
+    -9.812,
+    3.8
+   ],
+   "length_m": 8.0,
+   "z_min_m": 3.8,
+   "z_max_m": 3.8
+  },
+  {
+   "id": "H66",
+   "type": "hip",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    0.852,
+    -9.812,
+    3.8
+   ],
+   "b_enu": [
+    -4.232,
+    -12.292,
+    5.8
+   ],
+   "length_m": 6.0,
+   "z_min_m": 3.8,
+   "z_max_m": 5.8
+  },
+  {
+   "id": "E67",
+   "type": "eave",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    0.852,
+    -9.812,
+    3.8
+   ],
+   "b_enu": [
+    -6.712,
+    -7.207,
+    3.8
+   ],
+   "length_m": 8.0,
+   "z_min_m": 3.8,
+   "z_max_m": 3.8
+  },
+  {
+   "id": "H68",
+   "type": "hip",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    -6.712,
+    -7.207,
+    3.8
+   ],
+   "b_enu": [
+    -4.232,
+    -12.292,
+    5.8
+   ],
+   "length_m": 6.0,
+   "z_min_m": 3.8,
+   "z_max_m": 5.8
+  },
+  {
+   "id": "E69",
+   "type": "eave",
+   "mass": "sw_pavilion",
+   "a_enu": [
+    -6.712,
+    -7.207,
+    3.8
+   ],
+   "b_enu": [
+    -9.317,
+    -14.772,
+    3.8
+   ],
+   "length_m": 8.0,
+   "z_min_m": 3.8,
+   "z_max_m": 3.8
+  }
+ ],
+ "totals_not_quotable": {
+  "facet_count": 30,
+  "roof_area_m2_unclipped_sum": 1646.5,
+  "ridge_m": 42.6,
+  "hip_m": 231.6,
+  "eave_m": 383.8
+ }
+}

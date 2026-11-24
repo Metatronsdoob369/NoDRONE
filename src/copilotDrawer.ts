@@ -72,6 +72,12 @@ function formatToolChipLabel(name: string, args: Record<string, unknown>): strin
       return `panel ${String(args.panel ?? '')}`;
     case 'highlightControl':
       return `spotlight ${String(args.controlId ?? '')}`;
+    case 'setGeoBox': {
+      const label = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : 'geo-box';
+      return `drawBox ${label}`;
+    }
+    case 'clearGeoBox':
+      return 'clearGeoBox';
     case 'webSearch': {
       const q = String(args.query ?? '').trim();
       return `search "${q.length > 26 ? `${q.slice(0, 25)}…` : q}"`;

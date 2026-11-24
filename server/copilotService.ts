@@ -304,9 +304,9 @@ export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
       properties: {
         panel: {
           type: Type.STRING,
-          enum: ['world', 'flight', 'capture', 'site', 'weather', 'telemetry', 'summon', 'none'],
+          enum: ['world', 'flight', 'capture', 'box', 'site', 'weather', 'telemetry', 'summon', 'none'],
           description:
-            'Card to display above the bottom command rail ("world", "flight", "capture", "site", "weather", "telemetry"), "summon" for the 2x2 overview cluster, or "none" to tuck all cards.',
+            'Card to display above the bottom command rail ("world", "flight", "capture", "box", "site", "weather", "telemetry"), "summon" for the overview cluster, or "none" to tuck all cards.',
         },
       },
       required: ['panel'],
@@ -322,7 +322,7 @@ export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
         controlId: {
           type: Type.STRING,
           description:
-            'Exact DOM ID of the button/control (e.g. "btn-load-redmond", "btn-toggle-google3d", "btn-rec-orbit", "btn-load-render-path", "btn-render-frames", "btn-export-manifest", "btn-measure-distance", "btn-weather-refresh", "btn-open-token", "btn-cluster-units").',
+            'Exact DOM ID of the button/control (e.g. "btn-load-redmond", "btn-toggle-google3d", "btn-rec-orbit", "btn-load-render-path", "btn-render-frames", "btn-box-draw", "btn-box-capture-bundle", "btn-export-manifest", "btn-measure-distance", "btn-weather-refresh", "btn-open-token", "btn-cluster-units").',
         },
         note: {
           type: Type.STRING,
@@ -331,6 +331,56 @@ export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
       },
       required: ['controlId'],
     },
+  },
+  {
+    name: 'setGeoBox',
+    description:
+      'Create or update a 3D Geo-Coordinate Draw Box bounding volume on the globe for 3D mesh/splat asset capture and Splat Studio bundle export. Can specify exact south/north/west/east bounds OR centerLat/centerLon with widthMeters/depthMeters.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        name: {
+          type: Type.STRING,
+          description: 'Optional asset name for the draw box (e.g. "Stadium Mesh").',
+        },
+        centerLat: {
+          type: Type.NUMBER,
+          description: 'Center latitude in decimal degrees (optional if south/north given or defaults to current view).',
+        },
+        centerLon: {
+          type: Type.NUMBER,
+          description: 'Center longitude in decimal degrees (optional if west/east given or defaults to current view).',
+        },
+        widthMeters: {
+          type: Type.NUMBER,
+          description: 'East-west box width in meters (default 100).',
+        },
+        depthMeters: {
+          type: Type.NUMBER,
+          description: 'North-south box depth in meters (default 100).',
+        },
+        south: { type: Type.NUMBER, description: 'Optional exact southern latitude bound in degrees.' },
+        north: { type: Type.NUMBER, description: 'Optional exact northern latitude bound in degrees.' },
+        west: { type: Type.NUMBER, description: 'Optional exact western longitude bound in degrees.' },
+        east: { type: Type.NUMBER, description: 'Optional exact eastern longitude bound in degrees.' },
+        heightMeters: {
+          type: Type.NUMBER,
+          description: 'Vertical ceiling height of the box in meters above base (10 to 500, default 60).',
+        },
+        baseOffsetMeters: {
+          type: Type.NUMBER,
+          description: 'Vertical offset of the box base in meters relative to ground/surface (-50 to 250, default 0).',
+        },
+        frame: {
+          type: Type.BOOLEAN,
+          description: 'If true, smoothly fly the camera to frame the new 3D draw box.',
+        },
+      },
+    },
+  },
+  {
+    name: 'clearGeoBox',
+    description: 'Remove the active 3D Geo-Coordinate Draw Box from the viewport.',
   },
   {
     name: 'webSearch',

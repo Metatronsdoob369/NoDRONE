@@ -22,6 +22,18 @@ import {
   runWebSearch,
 } from './copilotService.ts';
 
+interface ReverseGeocodePayload {
+  city: string | null;
+  region: string | null;
+  regionCode: string | null;
+  country: string | null;
+  countryCode: string | null;
+  ocean: string | null;
+  source: 'bigdatacloud' | 'nominatim' | 'fallback';
+}
+
+const reverseGeocodeCache = new Map<string, { ts: number; payload: ReverseGeocodePayload }>();
+
 function parseJsonBody<T>(req: IncomingMessage): Promise<T> {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -289,6 +301,127 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
     } catch (err: any) {
       console.error('API /api/maps/geocode error:', err);
       sendJson(res, 500, { error: err.message });
+      return true;
+    }
+  }
+
+  // 6b. Live Reverse Geocoding (City, State/Region, Country, or Ocean) with LRU cache
+  if (url.startsWith('/api/maps/reverse') && req.method === 'GET') {
+    try {
+      const u = new URL(url, 'http://localhost');
+      const lat = Number(u.searchParams.get('lat'));
+      const lon = Number(u.searchParams.get('lon'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+        sendJson(res, 400, { error: 'Valid lat (-90..90) and lon (-180..180) are required.' });
+        return true;
+      }
+
+      const cacheKey = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+      const cached = reverseGeocodeCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < 3600_000) {
+        sendJson(res, 200, cached.payload);
+        return true;
+      }
+
+      let payload: ReverseGeocodePayload | null = null;
+
+      // Primary: BigDataCloud free reverse geocode (fast, includes ocean/sea names)
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3500);
+        const bdcUrl = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${encodeURIComponent(lat.toFixed(5))}&longitude=${encodeURIComponent(lon.toFixed(5))}&localityLanguage=en`;
+        const bdcResp = await fetch(bdcUrl, { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (bdcResp.ok) {
+          const d: any = await bdcResp.json();
+          const city = String(d?.city || d?.locality || '').trim();
+          const region = String(d?.principalSubdivision || '').trim();
+          const isoSub = String(d?.principalSubdivisionCode || '').trim();
+          const regionCode = isoSub.includes('-') ? isoSub.split('-').pop() || '' : '';
+          const country = String(d?.countryName || '').trim();
+          const countryCode = String(d?.countryCode || '').trim();
+          const ocean = !country
+            ? String(
+                d?.localityInfo?.informative?.find((i: any) => i?.description?.toLowerCase().includes('ocean') || i?.description?.toLowerCase().includes('sea'))?.name ||
+                  d?.locality ||
+                  ''
+              ).trim()
+            : '';
+
+          if (city || region || country || ocean) {
+            payload = {
+              city: city || null,
+              region: region || null,
+              regionCode: regionCode || null,
+              country: country || null,
+              countryCode: countryCode || null,
+              ocean: ocean || null,
+              source: 'bigdatacloud',
+            };
+          }
+        }
+      } catch {
+        // fall through to Nominatim
+      }
+
+      // Secondary fallback: OpenStreetMap Nominatim
+      if (!payload) {
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 4000);
+          const nomUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat.toFixed(5))}&lon=${encodeURIComponent(lon.toFixed(5))}&zoom=10`;
+          const nomResp = await fetch(nomUrl, {
+            signal: ctrl.signal,
+            headers: { 'User-Agent': 'NoDRONE-Survey-Engine/2.4' },
+          });
+          clearTimeout(timer);
+          if (nomResp.ok) {
+            const nd: any = await nomResp.json();
+            const addr = nd?.address || {};
+            const city = String(addr.city || addr.town || addr.village || addr.hamlet || addr.municipality || addr.county || '').trim();
+            const region = String(addr.state || addr.region || '').trim();
+            const iso3166 = String(addr['ISO3166-2-lvl4'] || '').trim();
+            const regionCode = iso3166.includes('-') ? iso3166.split('-').pop() || '' : '';
+            const country = String(addr.country || '').trim();
+            const countryCode = String(addr.country_code || '').toUpperCase().trim();
+            const hasLand = Boolean(city || region || country);
+            payload = {
+              city: city || null,
+              region: region || null,
+              regionCode: regionCode || null,
+              country: country || null,
+              countryCode: countryCode || null,
+              ocean: hasLand ? null : 'Open Ocean',
+              source: 'nominatim',
+            };
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!payload) {
+        payload = {
+          city: null,
+          region: null,
+          regionCode: null,
+          country: null,
+          countryCode: null,
+          ocean: 'Open Ocean',
+          source: 'fallback',
+        };
+      }
+
+      if (reverseGeocodeCache.size >= 500) {
+        const oldestKey = reverseGeocodeCache.keys().next().value;
+        if (oldestKey) reverseGeocodeCache.delete(oldestKey);
+      }
+      reverseGeocodeCache.set(cacheKey, { ts: Date.now(), payload });
+      sendJson(res, 200, payload);
+      return true;
+    } catch (err: any) {
+      console.error('API /api/maps/reverse error:', err);
+      sendJson(res, 500, { error: err?.message || 'Reverse geocode failed' });
       return true;
     }
   }

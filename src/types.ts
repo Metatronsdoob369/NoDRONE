@@ -9,7 +9,7 @@ export type HealthState = 'ok' | 'warn' | 'critical';
 export type FlightMode = 'explore' | 'wasd' | 'orbit' | 'tour';
 export type MeasureMode = 'off' | 'distance' | 'area';
 export type PanelTab = 'map' | 'flight' | 'manifest';
-export type ActiveCard = 'world' | 'flight' | 'capture' | 'site' | 'weather' | 'telemetry' | null;
+export type ActiveCard = 'world' | 'flight' | 'capture' | 'box' | 'site' | 'weather' | 'telemetry' | null;
 export type HudMode = 'rail' | 'summon' | 'zen';
 
 export interface UiControlEntry {
@@ -133,6 +133,25 @@ export interface CameraState {
   roll: number;
 }
 
+export interface GeoDrawBoxSnapshot {
+  name: string;
+  south: number;
+  north: number;
+  west: number;
+  east: number;
+  centerLat: number;
+  centerLon: number;
+  baseEllipsoidalMeters: number;
+  baseOffsetMeters: number;
+  heightMeters: number;
+  ceilingEllipsoidalMeters: number;
+  widthMeters: number;
+  depthMeters: number;
+  areaSqMeters: number;
+  captureViews: number;
+  visible: boolean;
+}
+
 export interface CopilotContextSnapshot {
   camera: CameraState | null;
   loadedTilesets: Array<{
@@ -164,6 +183,7 @@ export interface CopilotContextSnapshot {
     cloudCoverPct: number;
     updatedAt: string;
   } | null;
+  geoBox?: GeoDrawBoxSnapshot | null;
   uiState?: UiStateSnapshot;
 }
 

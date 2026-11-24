@@ -1,0 +1,75 @@
+[
+ {
+  "name": "A1_cupola",
+  "role": "origin",
+  "lat": "35°28'08.71\"N",
+  "lon": "80°06'09.18\"W",
+  "elev_m": 164,
+  "note": "Cupola / roof lantern, clubhouse center — ORIGIN (0,0,0); ground under building taken as 163 m",
+  "es_alt": 163
+ },
+ {
+  "name": "A2_roof_W_NW",
+  "role": "anchor",
+  "lat": "35°28'08.91\"N",
+  "lon": "80°06'10.45\"W",
+  "elev_m": 163,
+  "note": "West block – NW roof corner"
+ },
+ {
+  "name": "A3_roof_W_SW",
+  "role": "anchor",
+  "lat": "35°28'08.60\"N",
+  "lon": "80°06'10.43\"W",
+  "elev_m": 163,
+  "note": "West block – SW roof corner"
+ },
+ {
+  "name": "A4_roof_E_NE",
+  "role": "anchor",
+  "lat": "35°28'08.37\"N",
+  "lon": "80°06'08.06\"W",
+  "elev_m": 163,
+  "note": "East block – NE roof corner"
+ },
+ {
+  "name": "A5_roof_E_SE",
+  "role": "anchor",
+  "lat": "35°28'07.86\"N",
+  "lon": "80°06'08.29\"W",
+  "elev_m": 162,
+  "note": "East block – SE roof corner"
+ },
+ {
+  "name": "A6_lot_S_NE",
+  "role": "anchor",
+  "lat": "35°28'05.85\"N",
+  "lon": "80°06'11.00\"W",
+  "elev_m": 157,
+  "note": "South parking lot – NE corner"
+ },
+ {
+  "name": "A7_lot_S_NW",
+  "role": "anchor",
+  "lat": "35°28'05.39\"N",
+  "lon": "80°06'12.35\"W",
+  "elev_m": 156,
+  "note": "South parking lot – NW corner"
+ },
+ {
+  "name": "A8_pavilion_W",
+  "role": "anchor",
+  "lat": "35°28'09.91\"N",
+  "lon": "80°06'11.91\"W",
+  "elev_m": 160,
+  "note": "West pavilion – roof center"
+ },
+ {
+  "name": "REF_roundabout_pin",
+  "role": "ref",
+  "lat": "35°28'09.84\"N",
+  "lon": "80°06'09.00\"W",
+  "elev_m": 162,
+  "note": "Roundabout island — the searched 'Selected Location' pin; reference only, not a fiducial"
+ }
+]

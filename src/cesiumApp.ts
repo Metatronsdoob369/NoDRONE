@@ -5,6 +5,7 @@ import type {
   CopilotContextSnapshot,
   CopilotToolResult,
   FlightMode,
+  GeoDrawBoxSnapshot,
   HealthState,
   HudMode,
   LogLevel,
@@ -19,6 +20,28 @@ import type {
   WeatherTileLayer,
   WeatherUnitSystem,
 } from './types';
+import {
+  blenderFocalLengthMm,
+  buildLookAtC2W,
+  c2wOpenCvToCesiumHPR,
+  computePinholeK,
+  convertGesTrackingJson,
+  extractRotation3x3,
+  formatDms,
+  isGesTrackingJson,
+  openCvToOpenGlC2W,
+  rotationMatrixToQuaternion,
+  round7,
+  roundTo,
+  sha256Hex,
+  wgs84ToEnuEllipsoidal,
+  type BlenderTrajectoryDocument,
+  type CameraMatricesDocument,
+  type FlyoverAnchor,
+  type PinholeIntrinsics,
+  type UnitQuaternion,
+} from './geodesy';
+import { MAJOR_CITIES, US_STATES, WORLD_COUNTRIES } from './placesDataset';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
 const DEFAULT_ION_TOKEN = '';
@@ -228,6 +251,9 @@ let cameraPathRemove: (() => void) | null = null;
   let isRenderingPath = false;
   let renderPathCancelled = false;
   let renderZipParts: RenderZipPart[] = [];
+  let renderPathEntities: any[] = [];
+  let isPreviewingRenderPath = false;
+  let renderPathPreviewRaf: number | null = null;
   const supportsDirectoryPicker =
     typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
 
@@ -236,6 +262,53 @@ let cameraPathRemove: (() => void) | null = null;
   let measurePositions: any[] = [];
   let measureEntities: any[] = [];
   let measureHandler: any = null;
+
+  // Geo-Coordinate Draw Box & Splat Studio Capture State
+  interface GeoDrawBoxState {
+    name: string;
+    south: number;
+    north: number;
+    west: number;
+    east: number;
+    surfaceBaseMeters: number;
+    baseOffsetMeters: number;
+    heightMeters: number;
+    visible: boolean;
+  }
+  let geoBox: GeoDrawBoxState | null = null;
+  let geoBoxDrawing = false;
+  let geoBoxAnchor: { lat: number; lon: number; height: number } | null = null;
+  let geoBoxEntities: any[] = [];
+  let geoBoxPreviewEntities: any[] = [];
+  let geoBoxDrawHandler: any = null;
+  let geoBoxDragHandler: any = null;
+  let geoBoxDraggingCorner: 'sw' | 'se' | 'ne' | 'nw' | 'top' | 'base' | null = null;
+  let geoBoxDragStartY = 0;
+  let geoBoxDragStartHeight = 25;
+  let geoBoxDragStartBaseOffset = 0;
+  let geoBoxVerticalMetersPerPx = 0.25;
+  let geoBoxCaptureViews = 12;
+  let isCapturingGeoBox = false;
+  let geoBoxCaptureCancelled = false;
+
+  // Map Labels Overlay & Live Reverse-Geocode Location State
+  let mapLabelsEnabled = true;
+  let mapLabelsTempHidden = false;
+  let mapLabelsImageryLayer: any = null;
+  let mapLabelsImageryLoading = false;
+  let mapLabelsImageryGeneration = 0;
+  let mapLabelEntities: Array<{ entity: any; position: any }> = [];
+  let reverseGeocodeTimer: number | null = null;
+  let lastReverseLat = Number.NaN;
+  let lastReverseLon = Number.NaN;
+  let lastReverseData: {
+    city: string | null;
+    region: string | null;
+    regionCode: string | null;
+    country: string | null;
+    countryCode: string | null;
+    ocean: string | null;
+  } | null = null;
 
   // Telemetry & Chronograph Cluster Gauge State
   let frameCount = 0;
@@ -275,6 +348,8 @@ let cameraPathRemove: (() => void) | null = null;
   const cardStage = el<HTMLDivElement>('card-stage');
   const summonGrid = el<HTMLElement>('summon-grid');
   const flightClusterGauge = el<HTMLElement>('flight-cluster-gauge');
+  const boxDrawBanner = el<HTMLDivElement>('box-draw-banner');
+  const boxDrawBannerText = el<HTMLSpanElement>('box-draw-banner-text');
   const spotlightTag = el<HTMLDivElement>('copilot-spotlight-tag');
   const healthLogList = el<HTMLDivElement>('health-log-list');
   const tilesetListEl = el<HTMLDivElement>('tileset-list');
@@ -896,9 +971,205 @@ let cameraPathRemove: (() => void) | null = null;
     }
   }
 
+  function clearRenderPathOverlay(): void {
+    if (viewer?.entities) {
+      for (const ent of renderPathEntities) {
+        viewer.entities.remove(ent);
+      }
+    }
+    renderPathEntities = [];
+  }
+
+  function renderLoadedPathOverlay(): void {
+    clearRenderPathOverlay();
+    if (!viewer?.entities || !loadedRenderPath || loadedRenderPath.samples.length === 0) return;
+
+    const samples = loadedRenderPath.samples;
+    const positions = samples.map((s) => Cesium.Cartesian3.fromDegrees(s.lon, s.lat, s.height));
+    const goldBright = Cesium.Color.fromCssColorString('#f3dc9f');
+    const emerald = Cesium.Color.fromCssColorString('#34d399');
+
+    if (positions.length >= 2) {
+      renderPathEntities.push(
+        viewer.entities.add({
+          polyline: {
+            positions,
+            width: 2.5,
+            material: new Cesium.PolylineGlowMaterialProperty({
+              glowPower: 0.18,
+              color: goldBright.withAlpha(0.9),
+            }),
+            depthFailMaterial: goldBright.withAlpha(0.3),
+          },
+        })
+      );
+    }
+
+    // Frame 1 START pin
+    renderPathEntities.push(
+      viewer.entities.add({
+        position: positions[0],
+        point: {
+          pixelSize: 10,
+          color: emerald,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+        label: {
+          text: `START · F1`,
+          font: '600 10px "JetBrains Mono", monospace',
+          fillColor: emerald,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          pixelOffset: new Cesium.Cartesian2(0, -14),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      })
+    );
+
+    if (positions.length >= 2) {
+      renderPathEntities.push(
+        viewer.entities.add({
+          position: positions[positions.length - 1],
+          point: {
+            pixelSize: 8,
+            color: goldBright,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          label: {
+            text: `END · F${positions.length}`,
+            font: '600 10px "JetBrains Mono", monospace',
+            fillColor: goldBright,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            pixelOffset: new Cesium.Cartesian2(0, -14),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        })
+      );
+    }
+  }
+
+  function stopRenderPathPreview(): void {
+    if (renderPathPreviewRaf !== null) {
+      window.cancelAnimationFrame(renderPathPreviewRaf);
+      renderPathPreviewRaf = null;
+    }
+    if (isPreviewingRenderPath) {
+      isPreviewingRenderPath = false;
+      updateRenderPathButtons();
+    }
+  }
+
+  function flyToLoadedRenderPathStart(duration = 1.4): void {
+    if (!viewer || !loadedRenderPath || loadedRenderPath.samples.length === 0) return;
+    stopRenderPathPreview();
+    if (flightMode !== 'explore') setFlightMode('explore');
+    const first = loadedRenderPath.samples[0];
+    const canvas = viewer.scene?.canvas as HTMLCanvasElement | undefined;
+    if (
+      typeof first.fovyDeg === 'number' &&
+      Number.isFinite(first.fovyDeg) &&
+      first.fovyDeg > 1 &&
+      first.fovyDeg < 175 &&
+      viewer.camera.frustum &&
+      typeof viewer.camera.frustum.fov === 'number'
+    ) {
+      const w = canvas?.clientWidth || loadedRenderPath.resolution[0] || 1280;
+      const h = canvas?.clientHeight || loadedRenderPath.resolution[1] || 720;
+      viewer.camera.frustum.fov = computeAppliedFovRad(first.fovyDeg, w, h);
+    }
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(first.lon, first.lat, first.height),
+      orientation: {
+        heading: Cesium.Math.toRadians(first.heading),
+        pitch: Cesium.Math.toRadians(first.pitch),
+        roll: Cesium.Math.toRadians(first.roll),
+      },
+      duration,
+    });
+  }
+
+  function toggleRenderPathPreview(): void {
+    if (!viewer || !loadedRenderPath || loadedRenderPath.samples.length === 0 || isRenderingPath) return;
+    if (isPreviewingRenderPath) {
+      stopRenderPathPreview();
+      showToast('Path preview stopped.');
+      return;
+    }
+
+    const path = loadedRenderPath;
+    if (flightMode !== 'explore') setFlightMode('explore');
+    isPreviewingRenderPath = true;
+    updateRenderPathButtons();
+
+    const samples = path.samples;
+    // Play orbital rigs (~8-25 frames) at a comfortable ~1.4 frames/sec so each angle is inspectable;
+    // play dense flight/GES trajectories at their native fps.
+    const playbackFps = samples.length <= 36 ? 1.5 : Math.max(10, Math.min(60, path.fps));
+    const startMs = performance.now();
+    const canvas = viewer.scene?.canvas as HTMLCanvasElement | undefined;
+
+    const tick = (now: number) => {
+      if (!isPreviewingRenderPath || !loadedRenderPath || loadedRenderPath !== path) {
+        stopRenderPathPreview();
+        return;
+      }
+      const elapsedSec = (now - startMs) / 1000;
+      const idx = Math.floor(elapsedSec * playbackFps);
+      if (idx >= samples.length) {
+        stopRenderPathPreview();
+        showToast(`Finished previewing ${samples.length} frames.`);
+        return;
+      }
+
+      const s = samples[idx];
+      if (
+        typeof s.fovyDeg === 'number' &&
+        Number.isFinite(s.fovyDeg) &&
+        s.fovyDeg > 1 &&
+        s.fovyDeg < 175 &&
+        viewer.camera.frustum &&
+        typeof viewer.camera.frustum.fov === 'number'
+      ) {
+        const w = canvas?.clientWidth || path.resolution[0] || 1280;
+        const h = canvas?.clientHeight || path.resolution[1] || 720;
+        viewer.camera.frustum.fov = computeAppliedFovRad(s.fovyDeg, w, h);
+      }
+
+      viewer.camera.setView({
+        destination: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, s.height),
+        orientation: {
+          heading: Cesium.Math.toRadians(s.heading),
+          pitch: Cesium.Math.toRadians(s.pitch),
+          roll: Cesium.Math.toRadians(s.roll),
+        },
+      });
+      renderPathPreviewRaf = window.requestAnimationFrame(tick);
+    };
+
+    showToast(`Previewing "${path.site}" (${samples.length} views)…`);
+    renderPathPreviewRaf = window.requestAnimationFrame(tick);
+  }
+
   function updateRenderPathButtons(): void {
+    const btnJump = el<HTMLButtonElement>('btn-path-jump');
+    const btnPreview = el<HTMLButtonElement>('btn-path-preview');
     if (btnRenderFrames) {
       btnRenderFrames.disabled = !loadedRenderPath || isRenderingPath;
+    }
+    if (btnJump) {
+      btnJump.disabled = !loadedRenderPath || isRenderingPath;
+    }
+    if (btnPreview) {
+      btnPreview.disabled = !loadedRenderPath || isRenderingPath;
+      btnPreview.setAttribute('data-active', String(isPreviewingRenderPath));
+      btnPreview.textContent = isPreviewingRenderPath ? 'Stop Preview' : 'Preview Path';
     }
     if (btnRenderToFolder) {
       if (supportsDirectoryPicker) {
@@ -919,12 +1190,130 @@ let cameraPathRemove: (() => void) | null = null;
     updateRenderPathButtons();
   }
 
+  function finalizeLoadedRenderPath(
+    path: LoadedRenderPath,
+    badgePrefix: string,
+    detailLog: string,
+    toastText: string
+  ): void {
+    stopRenderPathPreview();
+    loadedRenderPath = path;
+    clearRenderZipParts();
+    renderLoadedPathOverlay();
+
+    if (renderPathStatusEl) {
+      const prefix = badgePrefix ? `${badgePrefix} ` : '';
+      renderPathStatusEl.textContent = `${prefix}${path.samples.length}f · ${path.resolution[0]}×${path.resolution[1]} · ${path.fps}fps`;
+      renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[190px]';
+    }
+    updateRenderPathButtons();
+    flyToLoadedRenderPathStart(1.4);
+    logEvent(detailLog, 'ok');
+    showToast(toastText);
+  }
+
   async function loadRenderPathFile(file: File): Promise<void> {
     try {
       const text = await file.text();
       const raw = JSON.parse(text);
+
+      // Format 1: Google Earth Studio 3D Tracking Data JSON (`cameraFrames[]`)
+      if (isGesTrackingJson(raw)) {
+        const ges = convertGesTrackingJson(raw as Record<string, unknown>, {
+          convention: 'opencv',
+          useEllipsoidal: false,
+        });
+        finalizeLoadedRenderPath(
+          {
+            fileName: file.name,
+            site: ges.name || el<HTMLInputElement>('input-site-title')?.value || 'ges-site',
+            fps: ges.fps,
+            resolution: [ges.width, ges.height],
+            samples: ges.cesiumSamples,
+          },
+          'GES',
+          `Loaded GES 3D Tracking "${file.name}" (${ges.cesiumSamples.length} frames @ ${ges.width}×${ges.height}, ${ges.fps} fps, Blender f=${ges.blenderFocalMm.toFixed(2)}mm) — flying to Frame 1.`,
+          `Loaded GES path (${ges.cesiumSamples.length} frames) — flying to start`
+        );
+        return;
+      }
+
+      // Format 2: Splat Studio Bundle Manifest (`splatthat-bundle.json` with `captureRig.poses[]`)
+      if (raw && Array.isArray(raw?.captureRig?.poses) && raw.captureRig.poses.length > 0) {
+        const poses = raw.captureRig.poses as Array<Record<string, any>>;
+        const samples: RenderPathSample[] = poses.map((p, idx) => {
+          const lat = Number(p?.lat);
+          const lon = Number(p?.lon);
+          const height = Number(p?.height);
+          const heading = Number(p?.heading ?? 0);
+          const pitch = Number(p?.pitch ?? -35);
+          const roll = Number(p?.roll ?? 0);
+          if (![lat, lon, height, heading, pitch, roll].every((n) => Number.isFinite(n))) {
+            throw new Error(`Bundle pose #${idx + 1} has invalid coordinates/angles.`);
+          }
+          const fovyDeg = Number.isFinite(Number(p?.fovyDeg)) ? Number(p.fovyDeg) : null;
+          return { t: Number((idx / 30).toFixed(4)), lat, lon, height, heading, pitch, roll, fovyDeg };
+        });
+        const resArr = raw?.sceneContext?.resolution;
+        const resW = Array.isArray(resArr) && Number(resArr[0]) >= 64 ? Math.round(Number(resArr[0])) : 1280;
+        const resH = Array.isArray(resArr) && Number(resArr[1]) >= 64 ? Math.round(Number(resArr[1])) : 720;
+        const site = String(raw?.asset?.name || file.name.replace(/\.json$/i, '')).trim();
+        finalizeLoadedRenderPath(
+          { fileName: file.name, site, fps: 30, resolution: [resW, resH], samples },
+          'BUNDLE',
+          `Loaded Splat Studio Bundle "${file.name}" (${samples.length} camera poses @ ${resW}×${resH}) — flying to View 1.`,
+          `Loaded Studio Bundle (${samples.length} views) — flying to View 1`
+        );
+        return;
+      }
+
+      // Format 3: Flyover `camera_matrices.json` (`frames[]` with `c2w_enu_zup_rowmajor` + lat/lon/alt_asl_m)
+      if (
+        raw &&
+        Array.isArray(raw.frames) &&
+        raw.frames.length > 0 &&
+        Array.isArray(raw.frames[0]?.c2w_enu_zup_rowmajor) &&
+        typeof raw.frames[0]?.lat === 'number'
+      ) {
+        const frames = raw.frames as Array<Record<string, any>>;
+        const samples: RenderPathSample[] = frames.map((fr, idx) => {
+          const lat = Number(fr.lat);
+          const lon = Number(fr.lon);
+          const height = Number(fr.alt_asl_m ?? fr.height ?? 0);
+          const hpr = c2wOpenCvToCesiumHPR(fr.c2w_enu_zup_rowmajor as number[]);
+          const fovyDeg = Number.isFinite(Number(fr?.K?.fov_vertical_deg))
+            ? Number(fr.K.fov_vertical_deg)
+            : 40;
+          return {
+            t: Number.isFinite(Number(fr.time_s)) ? Number(fr.time_s) : Number((idx / 30).toFixed(4)),
+            lat,
+            lon,
+            height,
+            heading: hpr.heading,
+            pitch: hpr.pitch,
+            roll: hpr.roll,
+            fovyDeg,
+          };
+        });
+        const firstK = frames[0]?.K;
+        const resW = Number.isFinite(Number(firstK?.width)) ? Math.round(Number(firstK.width)) : 1920;
+        const resH = Number.isFinite(Number(firstK?.height)) ? Math.round(Number(firstK.height)) : 1080;
+        const fps = Number.isFinite(Number(raw.fps)) && Number(raw.fps) > 0 ? Number(raw.fps) : 30;
+        const site = String(raw.name || file.name.replace(/\.json$/i, '')).trim();
+        finalizeLoadedRenderPath(
+          { fileName: file.name, site, fps, resolution: [resW, resH], samples },
+          'MAT',
+          `Loaded camera_matrices.json "${file.name}" (${samples.length} frames @ ${resW}×${resH}, ${fps} fps) — flying to Frame 1.`,
+          `Loaded camera matrices (${samples.length} frames) — flying to start`
+        );
+        return;
+      }
+
+      // Format 4: Native `nodrone-camera-path/1` (`camera-path.json`)
       if (!raw || raw.schema !== 'nodrone-camera-path/1') {
-        throw new Error('Expected schema "nodrone-camera-path/1".');
+        throw new Error(
+          'Unrecognized JSON. Pick camera-path.json, a Google Earth Studio .json, camera_matrices.json, or splatthat-bundle.json.'
+        );
       }
       if (!Array.isArray(raw.samples) || raw.samples.length === 0) {
         throw new Error('Render path contains no samples.');
@@ -961,9 +1350,10 @@ let cameraPathRemove: (() => void) | null = null;
 
       let resW = 1920;
       let resH = 1080;
-      if (Array.isArray(raw.render?.resolution) && raw.render.resolution.length >= 2) {
-        const w = Math.round(Number(raw.render.resolution[0]));
-        const h = Math.round(Number(raw.render.resolution[1]));
+      const resSource = raw.render?.resolution ?? raw.resolution;
+      if (Array.isArray(resSource) && resSource.length >= 2) {
+        const w = Math.round(Number(resSource[0]));
+        const h = Math.round(Number(resSource[1]));
         if (Number.isFinite(w) && Number.isFinite(h) && w >= 64 && h >= 64 && w <= 7680 && h <= 4320) {
           resW = w;
           resH = h;
@@ -971,8 +1361,9 @@ let cameraPathRemove: (() => void) | null = null;
       }
 
       let fps = 30;
-      if (Number.isFinite(Number(raw.render?.fps)) && Number(raw.render.fps) > 0) {
-        fps = Number(raw.render.fps);
+      const fpsSource = raw.render?.fps ?? raw.fps;
+      if (Number.isFinite(Number(fpsSource)) && Number(fpsSource) > 0) {
+        fps = Number(fpsSource);
       } else if (
         samples.length >= 2 &&
         typeof samples[0].t === 'number' &&
@@ -984,25 +1375,21 @@ let cameraPathRemove: (() => void) | null = null;
         }
       }
 
-      loadedRenderPath = {
-        fileName: file.name,
-        site: String(raw.site || el<HTMLInputElement>('input-site-title')?.value || 'nodrone').trim(),
-        fps,
-        resolution: [resW, resH],
-        samples,
-      };
-      clearRenderZipParts();
-
-      if (renderPathStatusEl) {
-        renderPathStatusEl.textContent = `${samples.length}f · ${resW}×${resH} · ${fps}fps`;
-        renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[170px]';
-      }
-      updateRenderPathButtons();
-      logEvent(`Loaded render path "${file.name}" (${samples.length} frames @ ${resW}×${resH}, ${fps} fps).`, 'ok');
-      showToast(`Render path loaded (${samples.length} frames)`);
+      finalizeLoadedRenderPath(
+        {
+          fileName: file.name,
+          site: String(raw.site || el<HTMLInputElement>('input-site-title')?.value || 'nodrone').trim(),
+          fps,
+          resolution: [resW, resH],
+          samples,
+        },
+        '',
+        `Loaded render path "${file.name}" (${samples.length} frames @ ${resW}×${resH}, ${fps} fps) — flying to Frame 1.`,
+        `Path loaded (${samples.length} frames) — flying to start`
+      );
     } catch (err: any) {
       logEvent(`Render path load failed: ${err?.message || err}`, 'error');
-      showToast(`Invalid render path JSON: ${err?.message || 'parse error'}`, 'error');
+      showToast(`Invalid path JSON: ${err?.message || 'parse error'}`, 'error');
     }
   }
 
@@ -1280,9 +1667,14 @@ let cameraPathRemove: (() => void) | null = null;
     const container = el<HTMLDivElement>('cesium-container');
     if (!container) return;
 
+    stopRenderPathPreview();
     isRenderingPath = true;
     renderPathCancelled = false;
     clearRenderZipParts();
+    renderPathEntities.forEach((ent) => {
+      ent.show = false;
+    });
+    setMapLabelsTemporarilyHidden(true);
     updateRenderPathButtons();
     setFlightMode('explore');
 
@@ -1323,6 +1715,7 @@ let cameraPathRemove: (() => void) | null = null;
     const hudElements = [
       document.querySelector('header') as HTMLElement | null,
       flightClusterGauge,
+      boxDrawBanner,
       cardStage,
       summonGrid,
       spotlightTag,
@@ -1603,6 +1996,10 @@ let cameraPathRemove: (() => void) | null = null;
         renderProgressOverlay.classList.add('hidden');
         renderProgressOverlay.classList.remove('flex');
       }
+      renderPathEntities.forEach((ent) => {
+        ent.show = true;
+      });
+      setMapLabelsTemporarilyHidden(false);
       isRenderingPath = false;
     }
 
@@ -1860,6 +2257,1525 @@ let cameraPathRemove: (() => void) | null = null;
       if (primaryEl) primaryEl.textContent = mode === 'distance' ? 'Click start point...' : 'Click first corner...';
       if (secondaryEl) secondaryEl.textContent = 'Left-click points on the 3D scene · Right-click to finish.';
       logEvent(`3D ${mode} measurement tool active.`, 'info');
+    }
+  }
+
+  // =========================================================================
+  // Geo-Coordinate Draw Box & Splat Studio Multi-Angle Capture Engine
+  // =========================================================================
+
+  function pickGeoSurfacePoint(windowPos: any): { lat: number; lon: number; height: number } | null {
+    if (!viewer) return null;
+    let cartesian = viewer.scene.pickPositionSupported
+      ? viewer.scene.pickPosition(windowPos)
+      : undefined;
+    if (!Cesium.defined(cartesian)) {
+      const ray = viewer.camera.getPickRay(windowPos);
+      cartesian =
+        (ray ? viewer.scene.globe.pick(ray, viewer.scene) : undefined) ||
+        viewer.camera.pickEllipsoid(windowPos);
+    }
+    if (!Cesium.defined(cartesian)) return null;
+    const carto = Cesium.Cartographic.fromCartesian(cartesian);
+    if (!carto) return null;
+    return {
+      lat: Cesium.Math.toDegrees(carto.latitude),
+      lon: Cesium.Math.toDegrees(carto.longitude),
+      height: Number.isFinite(carto.height) ? carto.height : 0,
+    };
+  }
+
+  function computeGeoBoxMetrics(box: GeoDrawBoxState): GeoDrawBoxSnapshot {
+    const centerLat = (box.south + box.north) * 0.5;
+    const centerLon = (box.west + box.east) * 0.5;
+    const baseEllipsoidalMeters = box.surfaceBaseMeters + box.baseOffsetMeters;
+    const origin = {
+      lat: round7(centerLat),
+      lon: round7(centerLon),
+      alt: baseEllipsoidalMeters,
+    };
+    const swEnu = wgs84ToEnuEllipsoidal(box.south, box.west, baseEllipsoidalMeters, origin);
+    const neEnu = wgs84ToEnuEllipsoidal(box.north, box.east, baseEllipsoidalMeters, origin);
+    const widthMeters = Math.max(0.1, Math.abs(neEnu[0] - swEnu[0]));
+    const depthMeters = Math.max(0.1, Math.abs(neEnu[1] - swEnu[1]));
+    const ceilingEllipsoidalMeters = baseEllipsoidalMeters + box.heightMeters;
+    return {
+      name: box.name.trim() || 'Site Asset Mesh',
+      south: Number(box.south.toFixed(6)),
+      north: Number(box.north.toFixed(6)),
+      west: Number(box.west.toFixed(6)),
+      east: Number(box.east.toFixed(6)),
+      centerLat: Number(centerLat.toFixed(6)),
+      centerLon: Number(centerLon.toFixed(6)),
+      baseEllipsoidalMeters: Number(baseEllipsoidalMeters.toFixed(2)),
+      baseOffsetMeters: Number(box.baseOffsetMeters.toFixed(2)),
+      heightMeters: Number(box.heightMeters.toFixed(2)),
+      ceilingEllipsoidalMeters: Number(ceilingEllipsoidalMeters.toFixed(2)),
+      widthMeters: Number(widthMeters.toFixed(2)),
+      depthMeters: Number(depthMeters.toFixed(2)),
+      areaSqMeters: Number((widthMeters * depthMeters).toFixed(1)),
+      captureViews: geoBoxCaptureViews,
+      visible: box.visible,
+    };
+  }
+
+  function clearGeoBoxEntities(list: any[]): void {
+    if (viewer?.entities) {
+      list.forEach((ent) => viewer.entities.remove(ent));
+    }
+    list.length = 0;
+  }
+
+  function renderGeoBoxVolume(
+    south: number,
+    north: number,
+    west: number,
+    east: number,
+    baseAlt: number,
+    ceilingAlt: number,
+    targetList: any[],
+    options: { interactive: boolean; show: boolean; labelText?: string }
+  ): void {
+    clearGeoBoxEntities(targetList);
+    if (!viewer?.entities || !options.show) return;
+
+    const goldBright = Cesium.Color.fromCssColorString('#f3dc9f');
+    const goldMid = Cesium.Color.fromCssColorString('#d4af63');
+    const fillAlpha = options.interactive ? 0.14 : 0.1;
+
+    const baseCorners = [
+      Cesium.Cartesian3.fromDegrees(west, south, baseAlt),
+      Cesium.Cartesian3.fromDegrees(east, south, baseAlt),
+      Cesium.Cartesian3.fromDegrees(east, north, baseAlt),
+      Cesium.Cartesian3.fromDegrees(west, north, baseAlt),
+    ];
+    const topCorners = [
+      Cesium.Cartesian3.fromDegrees(west, south, ceilingAlt),
+      Cesium.Cartesian3.fromDegrees(east, south, ceilingAlt),
+      Cesium.Cartesian3.fromDegrees(east, north, ceilingAlt),
+      Cesium.Cartesian3.fromDegrees(west, north, ceilingAlt),
+    ];
+
+    // Translucent 3D extruded bounding volume
+    targetList.push(
+      viewer.entities.add({
+        polygon: {
+          hierarchy: new Cesium.PolygonHierarchy(baseCorners),
+          height: baseAlt,
+          extrudedHeight: ceilingAlt,
+          material: goldMid.withAlpha(fillAlpha),
+          outline: true,
+          outlineColor: goldBright.withAlpha(0.82),
+          outlineWidth: 1.5,
+        },
+      })
+    );
+
+    // Crisp top perimeter ring
+    targetList.push(
+      viewer.entities.add({
+        polyline: {
+          positions: [...topCorners, topCorners[0]],
+          width: 2.2,
+          material: goldBright,
+          depthFailMaterial: goldBright.withAlpha(0.35),
+        },
+      })
+    );
+
+    // Crisp base perimeter ring
+    targetList.push(
+      viewer.entities.add({
+        polyline: {
+          positions: [...baseCorners, baseCorners[0]],
+          width: 1.8,
+          material: goldMid.withAlpha(0.85),
+          depthFailMaterial: goldMid.withAlpha(0.3),
+        },
+      })
+    );
+
+    // 4 vertical corner pillars
+    for (let i = 0; i < 4; i++) {
+      targetList.push(
+        viewer.entities.add({
+          polyline: {
+            positions: [baseCorners[i], topCorners[i]],
+            width: 1.6,
+            material: goldBright.withAlpha(0.75),
+            depthFailMaterial: goldMid.withAlpha(0.28),
+          },
+        })
+      );
+    }
+
+    // Interactive corner drag handles (SW, SE, NE, NW) + vertical pull handles (TOP, BASE)
+    if (options.interactive) {
+      const centerLat = (south + north) * 0.5;
+      const centerLon = (west + east) * 0.5;
+      const baseCenterPos = Cesium.Cartesian3.fromDegrees(centerLon, centerLat, baseAlt);
+      const topCenterPos = Cesium.Cartesian3.fromDegrees(centerLon, centerLat, ceilingAlt);
+      const skyCyan = Cesium.Color.fromCssColorString('#7dd3fc');
+      const warmAmber = Cesium.Color.fromCssColorString('#fbbf24');
+
+      // Subtle vertical elevation spine connecting BASE and TOP handles
+      targetList.push(
+        viewer.entities.add({
+          polyline: {
+            positions: [baseCenterPos, topCenterPos],
+            width: 1.5,
+            material: new Cesium.PolylineDashMaterialProperty({
+              color: skyCyan.withAlpha(0.75),
+              dashLength: 10,
+            }),
+            depthFailMaterial: skyCyan.withAlpha(0.25),
+          },
+        })
+      );
+
+      // Vertical Ceiling pull handle (↕ TOP)
+      targetList.push(
+        viewer.entities.add({
+          position: topCenterPos,
+          properties: { geoBoxCorner: 'top' },
+          point: {
+            pixelSize: 13,
+            color: skyCyan,
+            outlineColor: Cesium.Color.fromCssColorString('#0b0f17'),
+            outlineWidth: 2.5,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          label: {
+            text: options.labelText ? `↕ TOP · ${options.labelText}` : '↕ TOP',
+            font: '600 11px "JetBrains Mono", monospace',
+            fillColor: Cesium.Color.fromCssColorString('#e0f2fe'),
+            showBackground: true,
+            backgroundColor: Cesium.Color.fromCssColorString('#0b0f17').withAlpha(0.84),
+            backgroundPadding: new Cesium.Cartesian2(8, 4),
+            pixelOffset: new Cesium.Cartesian2(0, -18),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        })
+      );
+
+      // Vertical Base Offset pull handle (↕ BASE)
+      targetList.push(
+        viewer.entities.add({
+          position: baseCenterPos,
+          properties: { geoBoxCorner: 'base' },
+          point: {
+            pixelSize: 11,
+            color: warmAmber,
+            outlineColor: Cesium.Color.fromCssColorString('#0b0f17'),
+            outlineWidth: 2,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          label: {
+            text: '↕ BASE',
+            font: '600 10px "JetBrains Mono", monospace',
+            fillColor: warmAmber,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            pixelOffset: new Cesium.Cartesian2(0, 16),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        })
+      );
+
+      const cornerDefs: Array<{ key: 'sw' | 'se' | 'ne' | 'nw'; label: string; pos: any }> = [
+        { key: 'sw', label: 'SW', pos: topCorners[0] },
+        { key: 'se', label: 'SE', pos: topCorners[1] },
+        { key: 'ne', label: 'NE', pos: topCorners[2] },
+        { key: 'nw', label: 'NW', pos: topCorners[3] },
+      ];
+      for (const c of cornerDefs) {
+        targetList.push(
+          viewer.entities.add({
+            position: c.pos,
+            properties: { geoBoxCorner: c.key },
+            point: {
+              pixelSize: 11,
+              color: goldBright,
+              outlineColor: Cesium.Color.fromCssColorString('#0b0f17'),
+              outlineWidth: 2,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+            label: {
+              text: c.label,
+              font: '600 10px "JetBrains Mono", monospace',
+              fillColor: goldBright,
+              outlineColor: Cesium.Color.BLACK,
+              outlineWidth: 2,
+              style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+              pixelOffset: new Cesium.Cartesian2(0, -14),
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          })
+        );
+      }
+    }
+  }
+
+  function syncGeoBoxUI(): void {
+    const statusEl = el<HTMLSpanElement>('box-status');
+    const dimEl = el<HTMLDivElement>('box-dim-readout');
+    const areaEl = el<HTMLDivElement>('box-area-readout');
+    const altEl = el<HTMLDivElement>('box-alt-readout');
+    const centerEl = el<HTMLDivElement>('box-center-readout');
+    const inpSouth = el<HTMLInputElement>('input-box-south');
+    const inpNorth = el<HTMLInputElement>('input-box-north');
+    const inpWest = el<HTMLInputElement>('input-box-west');
+    const inpEast = el<HTMLInputElement>('input-box-east');
+    const inpName = el<HTMLInputElement>('input-box-name');
+    const sliderBase = el<HTMLInputElement>('slider-box-base');
+    const sliderHeight = el<HTMLInputElement>('slider-box-height');
+    const valBase = el<HTMLSpanElement>('val-box-base');
+    const valHeight = el<HTMLSpanElement>('val-box-height');
+    const btnDraw = el<HTMLButtonElement>('btn-box-draw');
+    const btnVis = el<HTMLButtonElement>('btn-box-visible');
+    const btnFrame = el<HTMLButtonElement>('btn-box-frame');
+    const btnClear = el<HTMLButtonElement>('btn-box-clear');
+    const btnBundle = el<HTMLButtonElement>('btn-box-capture-bundle');
+    const btnJson = el<HTMLButtonElement>('btn-box-export-json');
+    const btnGeoJson = el<HTMLButtonElement>('btn-box-export-geojson');
+    const btnCopy = el<HTMLButtonElement>('btn-box-copy-coords');
+    const valViews = el<HTMLSpanElement>('val-box-views');
+
+    if (valViews) valViews.textContent = `${geoBoxCaptureViews} views + nadir`;
+    document.querySelectorAll<HTMLButtonElement>('.box-views-btn').forEach((btn) => {
+      const v = Number(btn.dataset.boxViews || 12);
+      btn.setAttribute('data-active', String(v === geoBoxCaptureViews));
+    });
+
+    if (btnDraw) {
+      btnDraw.setAttribute('data-active', String(geoBoxDrawing));
+      btnDraw.textContent = geoBoxDrawing ? 'Drawing…' : 'Draw on Globe';
+    }
+
+    const hasBox = geoBox !== null;
+    [btnVis, btnFrame, btnClear, btnJson, btnGeoJson, btnCopy].forEach((b) => {
+      if (b) b.disabled = !hasBox;
+    });
+    if (btnBundle) {
+      btnBundle.disabled = !hasBox || isCapturingGeoBox || isRenderingPath || isRecording;
+    }
+
+    if (!geoBox) {
+      if (statusEl) {
+        statusEl.textContent = geoBoxDrawing ? 'Picking corners…' : 'No box';
+        statusEl.className = geoBoxDrawing
+          ? 'text-[11px] font-mono text-[#e7cb88] truncate'
+          : 'text-[11px] font-mono text-slate-400 truncate';
+      }
+      if (dimEl) dimEl.textContent = '-- × -- m';
+      if (areaEl) areaEl.textContent = '-- m²';
+      if (altEl) altEl.textContent = '-- → -- m';
+      if (centerEl) centerEl.textContent = '--°, --°';
+      if (inpSouth && document.activeElement !== inpSouth) inpSouth.value = '';
+      if (inpNorth && document.activeElement !== inpNorth) inpNorth.value = '';
+      if (inpWest && document.activeElement !== inpWest) inpWest.value = '';
+      if (inpEast && document.activeElement !== inpEast) inpEast.value = '';
+      if (btnVis) {
+        btnVis.textContent = 'Visible';
+        btnVis.setAttribute('data-active', 'true');
+      }
+      return;
+    }
+
+    const m = computeGeoBoxMetrics(geoBox);
+    if (statusEl) {
+      statusEl.textContent = geoBoxDrawing ? 'Redrawing…' : 'Locked';
+      statusEl.className = 'text-[11px] font-mono text-emerald-300 truncate';
+    }
+    if (dimEl) dimEl.textContent = `${m.widthMeters.toFixed(1)} × ${m.depthMeters.toFixed(1)} m`;
+    if (areaEl) {
+      const sqFt = Math.round(m.areaSqMeters * 10.7639);
+      areaEl.textContent = `${Math.round(m.areaSqMeters).toLocaleString()} m² · ${sqFt.toLocaleString()} ft²`;
+    }
+    if (altEl) {
+      altEl.textContent = `${Math.round(m.baseEllipsoidalMeters)} → ${Math.round(m.ceilingEllipsoidalMeters)} m`;
+    }
+    if (centerEl) centerEl.textContent = `${m.centerLat.toFixed(5)}°, ${m.centerLon.toFixed(5)}°`;
+
+    if (inpSouth && document.activeElement !== inpSouth) inpSouth.value = m.south.toFixed(6);
+    if (inpNorth && document.activeElement !== inpNorth) inpNorth.value = m.north.toFixed(6);
+    if (inpWest && document.activeElement !== inpWest) inpWest.value = m.west.toFixed(6);
+    if (inpEast && document.activeElement !== inpEast) inpEast.value = m.east.toFixed(6);
+    if (inpName && document.activeElement !== inpName) inpName.value = geoBox.name;
+    if (sliderBase) sliderBase.value = String(Math.round(geoBox.baseOffsetMeters));
+    if (sliderHeight) sliderHeight.value = String(Math.round(geoBox.heightMeters));
+    if (valBase) {
+      valBase.textContent = `${geoBox.baseOffsetMeters >= 0 ? '+' : ''}${Math.round(geoBox.baseOffsetMeters)} m`;
+    }
+    if (valHeight) valHeight.textContent = `${Math.round(geoBox.heightMeters)} m`;
+    if (btnVis) {
+      btnVis.textContent = geoBox.visible ? 'Visible' : 'Hidden';
+      btnVis.setAttribute('data-active', String(geoBox.visible));
+    }
+  }
+
+  function refreshGeoBoxGraphics(): void {
+    clearGeoBoxEntities(geoBoxPreviewEntities);
+    if (!geoBox) {
+      clearGeoBoxEntities(geoBoxEntities);
+      syncGeoBoxUI();
+      notifyUiStateChanged();
+      return;
+    }
+    const m = computeGeoBoxMetrics(geoBox);
+    renderGeoBoxVolume(
+      geoBox.south,
+      geoBox.north,
+      geoBox.west,
+      geoBox.east,
+      m.baseEllipsoidalMeters,
+      m.ceilingEllipsoidalMeters,
+      geoBoxEntities,
+      {
+        interactive: true,
+        show: geoBox.visible,
+        labelText: `${m.widthMeters.toFixed(0)}m × ${m.depthMeters.toFixed(0)}m × ${m.heightMeters.toFixed(0)}m`,
+      }
+    );
+    syncGeoBoxUI();
+    ensureGeoBoxDragHandler();
+    notifyUiStateChanged();
+  }
+
+  function destroyGeoBoxDragHandler(): void {
+    if (geoBoxDragHandler) {
+      geoBoxDragHandler.destroy();
+      geoBoxDragHandler = null;
+    }
+    geoBoxDraggingCorner = null;
+  }
+
+  function ensureGeoBoxDragHandler(): void {
+    if (!viewer || !geoBox || geoBoxDragHandler) return;
+    geoBoxDragHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+
+    geoBoxDragHandler.setInputAction((evt: any) => {
+      if (geoBoxDrawing || measureMode !== 'off' || !geoBox || !geoBox.visible) return;
+      const picked = viewer.scene.pick(evt.position);
+      const ent = picked?.id;
+      const handle = ent?.properties?.geoBoxCorner?.getValue?.();
+      if (
+        handle === 'sw' ||
+        handle === 'se' ||
+        handle === 'ne' ||
+        handle === 'nw' ||
+        handle === 'top' ||
+        handle === 'base'
+      ) {
+        geoBoxDraggingCorner = handle;
+        viewer.scene.screenSpaceCameraController.enableRotate = false;
+        viewer.scene.screenSpaceCameraController.enableTranslate = false;
+        viewer.scene.screenSpaceCameraController.enableZoom = false;
+
+        if (handle === 'top' || handle === 'base') {
+          geoBoxDragStartY = evt.position.y;
+          geoBoxDragStartHeight = geoBox.heightMeters;
+          geoBoxDragStartBaseOffset = geoBox.baseOffsetMeters;
+          const m = computeGeoBoxMetrics(geoBox);
+          const handleAlt = handle === 'top' ? m.ceilingEllipsoidalMeters : m.baseEllipsoidalMeters;
+          const handlePos = Cesium.Cartesian3.fromDegrees(m.centerLon, m.centerLat, handleAlt);
+          const dist = Cesium.Cartesian3.distance(viewer.camera.position, handlePos);
+          const fov =
+            typeof viewer.camera.frustum?.fovy === 'number'
+              ? viewer.camera.frustum.fovy
+              : Cesium.Math.toRadians(45);
+          const canvasH = Math.max(200, viewer.scene.canvas.clientHeight || 720);
+          geoBoxVerticalMetersPerPx = Math.max(
+            0.04,
+            Math.min(8.0, (2 * dist * Math.tan(fov * 0.5)) / canvasH)
+          );
+          viewer.scene.canvas.style.cursor = 'ns-resize';
+        } else {
+          viewer.scene.canvas.style.cursor = 'grabbing';
+        }
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_DOWN);
+
+    geoBoxDragHandler.setInputAction((movement: any) => {
+      if (!geoBox) return;
+
+      // Hover cursor affordance when not actively dragging
+      if (!geoBoxDraggingCorner) {
+        if (geoBoxDrawing || measureMode !== 'off' || !geoBox.visible) return;
+        const picked = viewer.scene.pick(movement.endPosition);
+        const handle = picked?.id?.properties?.geoBoxCorner?.getValue?.();
+        if (handle === 'top' || handle === 'base') {
+          viewer.scene.canvas.style.cursor = 'ns-resize';
+        } else if (handle === 'sw' || handle === 'se' || handle === 'ne' || handle === 'nw') {
+          viewer.scene.canvas.style.cursor = 'grab';
+        } else if (viewer.scene.canvas.style.cursor === 'grab' || viewer.scene.canvas.style.cursor === 'ns-resize') {
+          viewer.scene.canvas.style.cursor = '';
+        }
+        return;
+      }
+
+      // Vertical drag for TOP ceiling height or BASE elevation offset
+      if (geoBoxDraggingCorner === 'top') {
+        const deltaMeters = (geoBoxDragStartY - movement.endPosition.y) * geoBoxVerticalMetersPerPx;
+        geoBox.heightMeters = Math.max(4, Math.min(500, Math.round((geoBoxDragStartHeight + deltaMeters) * 2) / 2));
+        refreshGeoBoxGraphics();
+        return;
+      }
+      if (geoBoxDraggingCorner === 'base') {
+        const deltaMeters = (geoBoxDragStartY - movement.endPosition.y) * geoBoxVerticalMetersPerPx;
+        geoBox.baseOffsetMeters = Math.max(
+          -50,
+          Math.min(250, Math.round((geoBoxDragStartBaseOffset + deltaMeters) * 2) / 2)
+        );
+        refreshGeoBoxGraphics();
+        return;
+      }
+
+      // Horizontal XY drag for SW/SE/NE/NW footprint corners
+      const pt = pickGeoSurfacePoint(movement.endPosition);
+      if (!pt) return;
+      const minSpan = 0.00002;
+      if (geoBoxDraggingCorner === 'sw') {
+        geoBox.south = Math.min(pt.lat, geoBox.north - minSpan);
+        geoBox.west = Math.min(pt.lon, geoBox.east - minSpan);
+      } else if (geoBoxDraggingCorner === 'se') {
+        geoBox.south = Math.min(pt.lat, geoBox.north - minSpan);
+        geoBox.east = Math.max(pt.lon, geoBox.west + minSpan);
+      } else if (geoBoxDraggingCorner === 'ne') {
+        geoBox.north = Math.max(pt.lat, geoBox.south + minSpan);
+        geoBox.east = Math.max(pt.lon, geoBox.west + minSpan);
+      } else if (geoBoxDraggingCorner === 'nw') {
+        geoBox.north = Math.max(pt.lat, geoBox.south + minSpan);
+        geoBox.west = Math.min(pt.lon, geoBox.east - minSpan);
+      }
+      refreshGeoBoxGraphics();
+    }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+    geoBoxDragHandler.setInputAction(() => {
+      if (!geoBoxDraggingCorner) return;
+      const dragged = geoBoxDraggingCorner;
+      geoBoxDraggingCorner = null;
+      viewer.scene.screenSpaceCameraController.enableRotate = true;
+      viewer.scene.screenSpaceCameraController.enableTranslate = true;
+      viewer.scene.screenSpaceCameraController.enableZoom = true;
+      viewer.scene.canvas.style.cursor = '';
+      if (geoBox && (dragged === 'top' || dragged === 'base')) {
+        const m = computeGeoBoxMetrics(geoBox);
+        logEvent(
+          `Geo-Box vertical envelope updated: base ${m.baseEllipsoidalMeters.toFixed(1)}m → ceiling ${m.ceilingEllipsoidalMeters.toFixed(1)}m (height ${m.heightMeters.toFixed(1)}m).`,
+          'ok'
+        );
+      } else {
+        logEvent('Geo-Box corner bounds updated.', 'ok');
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_UP);
+  }
+
+  function setGeoBoxDrawing(active: boolean): void {
+    geoBoxDrawing = active;
+    geoBoxAnchor = null;
+    clearGeoBoxEntities(geoBoxPreviewEntities);
+
+    if (geoBoxDrawHandler) {
+      geoBoxDrawHandler.destroy();
+      geoBoxDrawHandler = null;
+    }
+
+    if (!active) {
+      if (boxDrawBanner) boxDrawBanner.classList.add('hidden');
+      if (viewer?.scene?.canvas) viewer.scene.canvas.style.cursor = '';
+      syncGeoBoxUI();
+      return;
+    }
+
+    if (!viewer) {
+      geoBoxDrawing = false;
+      return;
+    }
+
+    if (measureMode !== 'off') setMeasureMode('off');
+    if (flightMode !== 'explore') setFlightMode('explore');
+
+    // Tuck active card out of the way so the user has an unobstructed globe while picking corners
+    setActiveCard(null);
+    if (boxDrawBanner) boxDrawBanner.classList.remove('hidden');
+    if (boxDrawBannerText) boxDrawBannerText.textContent = 'Click corner 1 on the 3D globe or tileset';
+    viewer.scene.canvas.style.cursor = 'crosshair';
+
+    geoBoxDrawHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+
+    geoBoxDrawHandler.setInputAction((click: any) => {
+      const pt = pickGeoSurfacePoint(click.position);
+      if (!pt) {
+        showToast('Aim over the 3D globe or tileset to pick a corner.', 'error');
+        return;
+      }
+
+      if (!geoBoxAnchor) {
+        geoBoxAnchor = pt;
+        if (boxDrawBannerText) {
+          boxDrawBannerText.textContent = 'Move pointer and click corner 2 to lock capture box';
+        }
+        // Drop initial corner pin immediately
+        clearGeoBoxEntities(geoBoxPreviewEntities);
+        geoBoxPreviewEntities.push(
+          viewer.entities.add({
+            position: Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, pt.height + 1),
+            point: {
+              pixelSize: 9,
+              color: Cesium.Color.fromCssColorString('#f3dc9f'),
+              outlineColor: Cesium.Color.BLACK,
+              outlineWidth: 2,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          })
+        );
+        return;
+      }
+
+      // Corner 2 clicked — finalize 3D Draw Box
+      let south = Math.min(geoBoxAnchor.lat, pt.lat);
+      let north = Math.max(geoBoxAnchor.lat, pt.lat);
+      let west = Math.min(geoBoxAnchor.lon, pt.lon);
+      let east = Math.max(geoBoxAnchor.lon, pt.lon);
+
+      // Guarantee a sensible minimum footprint (~10m) if user double-clicked the same spot
+      if (north - south < 0.00008) {
+        const mid = (south + north) * 0.5;
+        south = mid - 0.00018;
+        north = mid + 0.00018;
+      }
+      if (east - west < 0.00008) {
+        const mid = (west + east) * 0.5;
+        west = mid - 0.00022;
+        east = mid + 0.00022;
+      }
+
+      const nameInput = el<HTMLInputElement>('input-box-name')?.value?.trim() || 'Site Asset Mesh';
+      const baseSlider = Number(el<HTMLInputElement>('slider-box-base')?.value ?? 0);
+      const heightSlider = Number(el<HTMLInputElement>('slider-box-height')?.value ?? 25);
+      const baseSurface = Math.min(geoBoxAnchor.height, pt.height);
+      const approxOrigin = { lat: round7((south + north) * 0.5), lon: round7((west + east) * 0.5), alt: baseSurface };
+      const swEnu = wgs84ToEnuEllipsoidal(south, west, baseSurface, approxOrigin);
+      const neEnu = wgs84ToEnuEllipsoidal(north, east, baseSurface, approxOrigin);
+      const maxSpan = Math.max(Math.abs(neEnu[0] - swEnu[0]), Math.abs(neEnu[1] - swEnu[1]));
+      const smartHeight =
+        heightSlider === 25
+          ? Math.max(10, Math.min(80, Math.round(maxSpan * 0.45)))
+          : Math.max(4, Math.min(500, heightSlider));
+
+      geoBox = {
+        name: nameInput,
+        south,
+        north,
+        west,
+        east,
+        surfaceBaseMeters: Number.isFinite(baseSurface) ? baseSurface : 0,
+        baseOffsetMeters: Number.isFinite(baseSlider) ? baseSlider : 0,
+        heightMeters: Number.isFinite(smartHeight) ? smartHeight : 25,
+        visible: true,
+      };
+
+      setGeoBoxDrawing(false);
+      refreshGeoBoxGraphics();
+      setActiveCard('box');
+      const m = computeGeoBoxMetrics(geoBox);
+      showToast(
+        `Geo-Box locked (${m.widthMeters.toFixed(0)}×${m.depthMeters.toFixed(0)}×${m.heightMeters.toFixed(0)}m) — drag ↕ TOP/BASE or corners`
+      );
+      logEvent(
+        `Geo-Box locked (${m.widthMeters.toFixed(1)}×${m.depthMeters.toFixed(1)}×${m.heightMeters.toFixed(1)}m @ ${m.centerLat.toFixed(5)}°, ${m.centerLon.toFixed(5)}°).`,
+        'ok'
+      );
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    geoBoxDrawHandler.setInputAction((movement: any) => {
+      if (!geoBoxAnchor) return;
+      const pt = pickGeoSurfacePoint(movement.endPosition);
+      if (!pt) return;
+      const south = Math.min(geoBoxAnchor.lat, pt.lat);
+      const north = Math.max(geoBoxAnchor.lat, pt.lat);
+      const west = Math.min(geoBoxAnchor.lon, pt.lon);
+      const east = Math.max(geoBoxAnchor.lon, pt.lon);
+      if (north - south < 0.000005 || east - west < 0.000005) return;
+      const baseOffset = Number(el<HTMLInputElement>('slider-box-base')?.value ?? 0);
+      const boxHeight = Number(el<HTMLInputElement>('slider-box-height')?.value ?? 25);
+      const baseAlt = Math.min(geoBoxAnchor.height, pt.height) + (Number.isFinite(baseOffset) ? baseOffset : 0);
+      renderGeoBoxVolume(south, north, west, east, baseAlt, baseAlt + boxHeight, geoBoxPreviewEntities, {
+        interactive: false,
+        show: true,
+      });
+    }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+    geoBoxDrawHandler.setInputAction(() => {
+      setGeoBoxDrawing(false);
+      setActiveCard('box');
+      showToast('Geo-Box drawing canceled.');
+    }, Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+
+    syncGeoBoxUI();
+  }
+
+  function dropGeoBoxAtView(options?: {
+    name?: string;
+    centerLat?: number;
+    centerLon?: number;
+    widthMeters?: number;
+    depthMeters?: number;
+    south?: number;
+    north?: number;
+    west?: number;
+    east?: number;
+    heightMeters?: number;
+    baseOffsetMeters?: number;
+    frame?: boolean;
+  }): GeoDrawBoxSnapshot | null {
+    if (!viewer) return null;
+    setGeoBoxDrawing(false);
+
+    let centerLat = options?.centerLat;
+    let centerLon = options?.centerLon;
+    let surfaceHeight = 0;
+
+    if (
+      typeof options?.south === 'number' &&
+      typeof options?.north === 'number' &&
+      typeof options?.west === 'number' &&
+      typeof options?.east === 'number' &&
+      Number.isFinite(options.south) &&
+      Number.isFinite(options.north) &&
+      Number.isFinite(options.west) &&
+      Number.isFinite(options.east)
+    ) {
+      const south = Math.min(options.south, options.north);
+      const north = Math.max(options.south, options.north);
+      const west = Math.min(options.west, options.east);
+      const east = Math.max(options.west, options.east);
+      const carto = viewer.camera?.positionCartographic;
+      surfaceHeight = carto ? Math.max(0, Math.min(carto.height - 80, 0)) : 0;
+      geoBox = {
+        name: options.name?.trim() || el<HTMLInputElement>('input-box-name')?.value?.trim() || 'Site Asset Mesh',
+        south,
+        north,
+        west,
+        east,
+        surfaceBaseMeters: surfaceHeight,
+        baseOffsetMeters:
+          typeof options.baseOffsetMeters === 'number' && Number.isFinite(options.baseOffsetMeters)
+            ? Math.max(-50, Math.min(250, options.baseOffsetMeters))
+            : 0,
+        heightMeters:
+          typeof options.heightMeters === 'number' && Number.isFinite(options.heightMeters)
+            ? Math.max(10, Math.min(500, options.heightMeters))
+            : 60,
+        visible: true,
+      };
+      refreshGeoBoxGraphics();
+      if (options.frame) frameGeoBox();
+      return computeGeoBoxMetrics(geoBox);
+    }
+
+    if (centerLat === undefined || centerLon === undefined || !Number.isFinite(centerLat) || !Number.isFinite(centerLon)) {
+      // Raycast center of the viewport
+      const canvas = viewer.scene.canvas;
+      const centerPx = new Cesium.Cartesian2(canvas.clientWidth * 0.5, canvas.clientHeight * 0.5);
+      const picked = pickGeoSurfacePoint(centerPx);
+      if (picked) {
+        centerLat = picked.lat;
+        centerLon = picked.lon;
+        surfaceHeight = picked.height;
+      } else if (viewer.camera?.positionCartographic) {
+        centerLat = Cesium.Math.toDegrees(viewer.camera.positionCartographic.latitude);
+        centerLon = Cesium.Math.toDegrees(viewer.camera.positionCartographic.longitude);
+        surfaceHeight = 0;
+      } else {
+        return null;
+      }
+    }
+
+    // Scale default box footprint intelligently based on current camera altitude when width/depth not explicitly provided
+    const camAlt = viewer.camera?.positionCartographic?.height ?? 350;
+    const autoSpan = Math.max(40, Math.min(320, Math.round((camAlt * 0.28) / 10) * 10));
+    const widthM =
+      typeof options?.widthMeters === 'number' && Number.isFinite(options.widthMeters)
+        ? Math.max(5, Math.min(5000, options.widthMeters))
+        : autoSpan;
+    const depthM =
+      typeof options?.depthMeters === 'number' && Number.isFinite(options.depthMeters)
+        ? Math.max(5, Math.min(5000, options.depthMeters))
+        : autoSpan;
+
+    const latRad = Cesium.Math.toRadians(centerLat);
+    const dLat = (depthM * 0.5) / 111132.92;
+    const dLon = (widthM * 0.5) / Math.max(1e-3, 111412.84 * Math.cos(latRad));
+
+    geoBox = {
+      name: options?.name?.trim() || el<HTMLInputElement>('input-box-name')?.value?.trim() || 'Site Asset Mesh',
+      south: centerLat - dLat,
+      north: centerLat + dLat,
+      west: centerLon - dLon,
+      east: centerLon + dLon,
+      surfaceBaseMeters: surfaceHeight,
+      baseOffsetMeters:
+        typeof options?.baseOffsetMeters === 'number' && Number.isFinite(options.baseOffsetMeters)
+          ? Math.max(-50, Math.min(250, options.baseOffsetMeters))
+          : 0,
+      heightMeters:
+        typeof options?.heightMeters === 'number' && Number.isFinite(options.heightMeters)
+          ? Math.max(10, Math.min(500, options.heightMeters))
+          : Math.max(25, Math.min(180, Math.round(Math.max(widthM, depthM) * 0.55))),
+      visible: true,
+    };
+
+    refreshGeoBoxGraphics();
+    if (options?.frame) frameGeoBox();
+    const m = computeGeoBoxMetrics(geoBox);
+    showToast(`Geo-Box dropped (${m.widthMeters.toFixed(0)}m × ${m.depthMeters.toFixed(0)}m × ${m.heightMeters.toFixed(0)}m)`);
+    logEvent(`Geo-Box created at ${m.centerLat.toFixed(5)}°, ${m.centerLon.toFixed(5)}° (${m.widthMeters.toFixed(0)}×${m.depthMeters.toFixed(0)}m).`, 'ok');
+    return m;
+  }
+
+  function clearGeoBox(): void {
+    setGeoBoxDrawing(false);
+    destroyGeoBoxDragHandler();
+    clearGeoBoxEntities(geoBoxEntities);
+    clearGeoBoxEntities(geoBoxPreviewEntities);
+    geoBox = null;
+    syncGeoBoxUI();
+    notifyUiStateChanged();
+    logEvent('Geo-Coordinate Draw Box cleared.', 'info');
+  }
+
+  function frameGeoBox(): void {
+    if (!viewer || !geoBox) return;
+    const m = computeGeoBoxMetrics(geoBox);
+    const centerMidAlt = m.baseEllipsoidalMeters + m.heightMeters * 0.5;
+    const radius = Math.sqrt(
+      Math.pow(m.widthMeters * 0.5, 2) +
+        Math.pow(m.depthMeters * 0.5, 2) +
+        Math.pow(m.heightMeters * 0.5, 2)
+    );
+    const range = Math.max(60, radius * 2.8);
+    const centerCartesian = Cesium.Cartesian3.fromDegrees(m.centerLon, m.centerLat, centerMidAlt);
+    const bs = new Cesium.BoundingSphere(centerCartesian, Math.max(10, radius));
+    viewer.camera.flyToBoundingSphere(bs, {
+      offset: new Cesium.HeadingPitchRange(
+        Cesium.Math.toRadians(35),
+        Cesium.Math.toRadians(-32),
+        range
+      ),
+      duration: 1.2,
+    });
+  }
+
+  function buildGeoBoxGeoJson(box: GeoDrawBoxState): Record<string, unknown> {
+    const m = computeGeoBoxMetrics(box);
+    return {
+      type: 'FeatureCollection',
+      properties: {
+        source: 'NoDRONE',
+        quotable: false,
+        provenance: 'observed_guide_internal',
+      },
+      features: [
+        {
+          type: 'Feature',
+          properties: {
+            name: m.name,
+            source: 'NoDRONE',
+            quotable: false,
+            provenance: 'observed_guide_internal',
+            baseEllipsoidalMeters: m.baseEllipsoidalMeters,
+            ceilingEllipsoidalMeters: m.ceilingEllipsoidalMeters,
+            heightMeters: m.heightMeters,
+            widthMeters: m.widthMeters,
+            depthMeters: m.depthMeters,
+            areaSqMeters: m.areaSqMeters,
+          },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [m.west, m.south, m.baseEllipsoidalMeters],
+                [m.east, m.south, m.baseEllipsoidalMeters],
+                [m.east, m.north, m.baseEllipsoidalMeters],
+                [m.west, m.north, m.baseEllipsoidalMeters],
+                [m.west, m.south, m.baseEllipsoidalMeters],
+              ],
+            ],
+          },
+        },
+      ],
+    };
+  }
+
+  interface GeoBoxRigPose {
+    index: number;
+    ring: 'low-oblique' | 'high-oblique' | 'nadir';
+    fileName: string;
+    lat: number;
+    lon: number;
+    height: number;
+    heading: number;
+    pitch: number;
+    roll: number;
+    fovyDeg: number;
+    enuPositionMeters: [number, number, number];
+    c2w_enu_zup_rowmajor: number[];
+    c2w_enu_zup_opengl_rowmajor: number[];
+    K: PinholeIntrinsics;
+    quaternionOpenCv: UnitQuaternion;
+    threeJsLocalMeters: {
+      position: [number, number, number];
+      lookAt: [number, number, number];
+    };
+  }
+
+  function computeGeoBoxCaptureRig(
+    box: GeoDrawBoxState,
+    totalOrbitalViews: number,
+    resolution: [number, number] = [1280, 720]
+  ): GeoBoxRigPose[] {
+    const m = computeGeoBoxMetrics(box);
+    const originLat = round7(m.centerLat);
+    const originLon = round7(m.centerLon);
+    const originAlt = m.baseEllipsoidalMeters;
+    const centerAlt = originAlt + m.heightMeters * 0.5;
+    const centerCartesian = Cesium.Cartesian3.fromDegrees(originLon, originLat, centerAlt);
+    const enuToFixed = Cesium.Transforms.eastNorthUpToFixedFrame(centerCartesian);
+
+    // Compute clean 3D bounding sphere & camera standoff so the entire box fills frame cleanly
+    const radius = Math.sqrt(
+      Math.pow(m.widthMeters * 0.5, 2) +
+        Math.pow(m.depthMeters * 0.5, 2) +
+        Math.pow(m.heightMeters * 0.5, 2)
+    );
+    const fovyDeg = Number(((2 * Math.atan(24 / (2 * activeLensMm)) * 180) / Math.PI).toFixed(2));
+    const fovyRad = Cesium.Math.toRadians(fovyDeg);
+    const standoff = Math.max(radius * 2.35, radius / Math.max(0.2, Math.sin(fovyRad * 0.36)));
+    const K = computePinholeK(resolution[0], resolution[1], fovyDeg);
+    const targetEnu: [number, number, number] = [0, 0, roundTo(m.heightMeters * 0.5, 4)];
+
+    const lowCount = Math.max(4, Math.ceil(totalOrbitalViews * 0.55));
+    const highCount = Math.max(4, totalOrbitalViews - lowCount);
+
+    const poses: GeoBoxRigPose[] = [];
+    let idx = 1;
+
+    const pushPose = (
+      ring: GeoBoxRigPose['ring'],
+      azimuthDeg: number,
+      elevationDeg: number,
+      rangeMeters: number
+    ) => {
+      const azRad = Cesium.Math.toRadians(azimuthDeg);
+      const elRad = Cesium.Math.toRadians(elevationDeg);
+      const horiz = rangeMeters * Math.cos(elRad);
+      // Camera offset in local ENU relative to box center midpoint
+      const east = horiz * Math.sin(azRad);
+      const north = horiz * Math.cos(azRad);
+      const upFromMid = rangeMeters * Math.sin(elRad);
+      const upFromBase = m.heightMeters * 0.5 + upFromMid;
+
+      const camCartesian = Cesium.Matrix4.multiplyByPoint(
+        enuToFixed,
+        new Cesium.Cartesian3(east, north, upFromMid),
+        new Cesium.Cartesian3()
+      );
+      const camCarto = Cesium.Cartographic.fromCartesian(camCartesian);
+      const heading = (azimuthDeg + 180) % 360;
+      const pitch = -elevationDeg;
+
+      const camEnu: [number, number, number] = [
+        roundTo(east, 6),
+        roundTo(north, 6),
+        roundTo(upFromBase, 6),
+      ];
+      const c2wOpenCv = buildLookAtC2W(camEnu, targetEnu, 'opencv').map((v) => roundTo(v, 6));
+      const c2wOpenGl = openCvToOpenGlC2W(c2wOpenCv).map((v) => roundTo(v, 6));
+      const qRaw = rotationMatrixToQuaternion(extractRotation3x3(c2wOpenCv));
+      const quaternionOpenCv: UnitQuaternion = {
+        qw: roundTo(qRaw.qw, 9),
+        qx: roundTo(qRaw.qx, 9),
+        qy: roundTo(qRaw.qy, 9),
+        qz: roundTo(qRaw.qz, 9),
+      };
+
+      poses.push({
+        index: idx,
+        ring,
+        fileName: `frames/view_${String(idx).padStart(3, '0')}.png`,
+        lat: Number(Cesium.Math.toDegrees(camCarto.latitude).toFixed(7)),
+        lon: Number(Cesium.Math.toDegrees(camCarto.longitude).toFixed(7)),
+        height: Number(camCarto.height.toFixed(2)),
+        heading: Number(heading.toFixed(2)),
+        pitch: Number(pitch.toFixed(2)),
+        roll: 0,
+        fovyDeg,
+        enuPositionMeters: [roundTo(east, 3), roundTo(north, 3), roundTo(upFromBase, 3)],
+        c2w_enu_zup_rowmajor: c2wOpenCv,
+        c2w_enu_zup_opengl_rowmajor: c2wOpenGl,
+        K,
+        quaternionOpenCv,
+        // Three.js Y-up right-handed metric coordinates (X = East, Y = Up from box base, Z = South = -North)
+        threeJsLocalMeters: {
+          position: [
+            Number(east.toFixed(3)),
+            Number(upFromBase.toFixed(3)),
+            Number((-north).toFixed(3)),
+          ],
+          lookAt: [0, Number((m.heightMeters * 0.5).toFixed(3)), 0],
+        },
+      });
+      idx += 1;
+    };
+
+    for (let i = 0; i < lowCount; i++) {
+      pushPose('low-oblique', (i * 360) / lowCount, 22, standoff);
+    }
+    const halfStep = 180 / highCount;
+    for (let i = 0; i < highCount; i++) {
+      pushPose('high-oblique', (i * 360) / highCount + halfStep, 48, standoff * 1.05);
+    }
+    // Top-down nadir shot directly over box center
+    pushPose('nadir', 0, 88, standoff * 1.12);
+
+    return poses;
+  }
+
+  function buildGeoBoxAnchorsJson(box: GeoDrawBoxState): FlyoverAnchor[] {
+    const m = computeGeoBoxMetrics(box);
+    const originLat = round7(m.centerLat);
+    const originLon = round7(m.centerLon);
+    const baseElev = roundTo(m.baseEllipsoidalMeters, 2);
+    return [
+      {
+        name: 'A1_origin',
+        role: 'origin',
+        lat: formatDms(originLat, 'lat'),
+        lon: formatDms(originLon, 'lon'),
+        elev_m: baseElev,
+        es_alt: baseElev,
+        note: `${m.name} — Geo-Box center ground origin (0,0,0) in local ENU`,
+      },
+      {
+        name: 'A2_box_SW',
+        role: 'anchor',
+        lat: formatDms(box.south, 'lat'),
+        lon: formatDms(box.west, 'lon'),
+        elev_m: baseElev,
+        note: 'Geo-Box Southwest footprint corner',
+      },
+      {
+        name: 'A3_box_SE',
+        role: 'anchor',
+        lat: formatDms(box.south, 'lat'),
+        lon: formatDms(box.east, 'lon'),
+        elev_m: baseElev,
+        note: 'Geo-Box Southeast footprint corner',
+      },
+      {
+        name: 'A4_box_NE',
+        role: 'anchor',
+        lat: formatDms(box.north, 'lat'),
+        lon: formatDms(box.east, 'lon'),
+        elev_m: baseElev,
+        note: 'Geo-Box Northeast footprint corner',
+      },
+      {
+        name: 'A5_box_NW',
+        role: 'anchor',
+        lat: formatDms(box.north, 'lat'),
+        lon: formatDms(box.west, 'lon'),
+        elev_m: baseElev,
+        note: 'Geo-Box Northwest footprint corner',
+      },
+    ];
+  }
+
+  function buildGeoBoxCameraMatricesJson(
+    box: GeoDrawBoxState,
+    poses: GeoBoxRigPose[]
+  ): CameraMatricesDocument {
+    const m = computeGeoBoxMetrics(box);
+    const originLat = round7(m.centerLat);
+    const originLon = round7(m.centerLon);
+    const originAlt = roundTo(m.baseEllipsoidalMeters, 2);
+    const origin = { lat: originLat, lon: originLon, alt: originAlt };
+    const fps = 30;
+    const fmtCoord = (v: number) => v.toFixed(7).replace(/0+$/, '').replace(/\.$/, '');
+
+    const corners: Array<{ name: string; lat: number; lon: number }> = [
+      { name: 'A1_origin', lat: originLat, lon: originLon },
+      { name: 'A2_box_SW', lat: box.south, lon: box.west },
+      { name: 'A3_box_SE', lat: box.south, lon: box.east },
+      { name: 'A4_box_NE', lat: box.north, lon: box.east },
+      { name: 'A5_box_NW', lat: box.north, lon: box.west },
+    ];
+
+    const anchorsEnu = corners.map((c) => {
+      const enu = wgs84ToEnuEllipsoidal(c.lat, c.lon, originAlt, origin);
+      return {
+        name: c.name,
+        E: roundTo(enu[0], 2),
+        N: roundTo(enu[1], 2),
+        U: roundTo(enu[2], 2),
+      };
+    });
+
+    return {
+      name: m.name,
+      frames_count: poses.length,
+      fps,
+      quotable: false,
+      conventions: {
+        world: `ENU metres from A1_origin ground point (${fmtCoord(originLat)}, ${fmtCoord(originLon)}, ${originAlt} m ASL): x=East, y=North, z=Up`,
+        camera: 'OpenCV: x=right, y=down, z=forward (up = -y)',
+        matrix:
+          'camera-to-world, 4x4, row-major, translation in last column; world_point = c2w @ [x_cam, y_cam, z_cam, 1]; invert for world-to-camera',
+        intrinsics: 'pinhole, principal point at image centre, fx=fy=(H/2)/tan(fov_v/2); no distortion',
+        source:
+          'NoDRONE Geo-Coordinate Draw Box orbital rig computed in WGS84 ellipsoidal ECEF->ENU frame',
+      },
+      verification: {
+        max_forward_error_deg_vs_camera_target: 0.0,
+        max_roll_deg: 0.0,
+        max_position_diff_m_es_vs_latlon: 0.0,
+      },
+      anchors_enu: anchorsEnu,
+      frames: poses.map((p, i) => ({
+        frame: i,
+        time_s: roundTo(i / fps, 4),
+        c2w_enu_zup_rowmajor: p.c2w_enu_zup_rowmajor,
+        K: p.K,
+        lat: p.lat,
+        lon: p.lon,
+        alt_asl_m: p.height,
+      })),
+    };
+  }
+
+  function buildGeoBoxTrajectoryJson(
+    box: GeoDrawBoxState,
+    poses: GeoBoxRigPose[],
+    resolution: [number, number]
+  ): BlenderTrajectoryDocument {
+    const m = computeGeoBoxMetrics(box);
+    const originLat = round7(m.centerLat);
+    const originLon = round7(m.centerLon);
+    const originAlt = roundTo(m.baseEllipsoidalMeters, 2);
+    const fmtCoord = (v: number) => v.toFixed(7).replace(/0+$/, '').replace(/\.$/, '');
+    const firstK = poses[0]?.K ?? computePinholeK(resolution[0], resolution[1], 40);
+    const fMm = blenderFocalLengthMm(firstK.fx, firstK.width, 36.0);
+
+    return {
+      site: m.name,
+      convention: 'opencv',
+      fps: 30,
+      quotable: false,
+      world: `ENU metres from A1_origin ground point (${fmtCoord(originLat)}, ${fmtCoord(originLon)}, ${originAlt} m ASL): x=East, y=North, z=Up`,
+      camera: 'OpenCV: x=right, y=down, z=forward (Blender G-buffer renderer applies OpenCV->OpenGL flip)',
+      blender_focal_mm: fMm,
+      sensor_width_mm: 36.0,
+      resolution,
+      trajectory: poses.map((p, i) => ({
+        frame: i,
+        x_enu: p.c2w_enu_zup_rowmajor[3],
+        y_enu: p.c2w_enu_zup_rowmajor[7],
+        z_enu: p.c2w_enu_zup_rowmajor[11],
+        qx: p.quaternionOpenCv.qx,
+        qy: p.quaternionOpenCv.qy,
+        qz: p.quaternionOpenCv.qz,
+        qw: p.quaternionOpenCv.qw,
+      })),
+    };
+  }
+
+  async function buildGeoBoxProvenanceJson(
+    box: GeoDrawBoxState,
+    entries: ZipEntryInput[]
+  ): Promise<Record<string, unknown>> {
+    const m = computeGeoBoxMetrics(box);
+    const artifacts: Array<{ path: string; sizeBytes: number; sha256: string }> = [];
+    for (const entry of entries) {
+      const digest = await sha256Hex(entry.data);
+      artifacts.push({
+        path: entry.name,
+        sizeBytes: entry.data.byteLength,
+        sha256: digest,
+      });
+    }
+    return {
+      schema: 'nodrone-provenance/1.0',
+      site: m.name,
+      exportedAt: new Date().toISOString(),
+      quotable: false,
+      provenanceTag: 'observed_guide_internal',
+      complianceBoundary:
+        'Visual cinematography and spatial guide registration only; non-quotable (quotable: false).',
+      attributionPolicy:
+        'CesiumJS / Google 3D Tiles attribution badges composited onto all captured PNG guide frames.',
+      artifactCount: artifacts.length,
+      artifacts,
+    };
+  }
+
+  function buildSplatStudioManifest(
+    box: GeoDrawBoxState,
+    poses: GeoBoxRigPose[],
+    resolution: [number, number]
+  ): Record<string, unknown> {
+    const m = computeGeoBoxMetrics(box);
+    const centerCartesian = Cesium.Cartesian3.fromDegrees(
+      m.centerLon,
+      m.centerLat,
+      m.baseEllipsoidalMeters + m.heightMeters * 0.5
+    );
+    const firstK = poses[0]?.K ?? computePinholeK(resolution[0], resolution[1], 40);
+    const blenderFocalMm = blenderFocalLengthMm(firstK.fx, firstK.width, 36.0);
+    return {
+      schema: 'nodrone-splat-bundle/1.1',
+      targetStudio: 'SplatEarthTheory (-splatthat)',
+      exportedAt: new Date().toISOString(),
+      quotable: false,
+      provenance: 'observed_guide_internal',
+      asset: {
+        name: m.name,
+        slug: m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site-asset',
+      },
+      bounds: {
+        wgs84: {
+          south: m.south,
+          north: m.north,
+          west: m.west,
+          east: m.east,
+          centerLat: m.centerLat,
+          centerLon: m.centerLon,
+          baseEllipsoidalMeters: m.baseEllipsoidalMeters,
+          ceilingEllipsoidalMeters: m.ceilingEllipsoidalMeters,
+        },
+        ecefCenterMeters: [
+          Number(centerCartesian.x.toFixed(3)),
+          Number(centerCartesian.y.toFixed(3)),
+          Number(centerCartesian.z.toFixed(3)),
+        ],
+        localMetricDimensions: {
+          widthMeters: m.widthMeters,
+          depthMeters: m.depthMeters,
+          heightMeters: m.heightMeters,
+          areaSqMeters: m.areaSqMeters,
+          coordinateSystem: 'Three.js Y-up right-handed (X=East, Y=Up from box base, Z=South)',
+          geodesyMethod: 'WGS84 ellipsoidal ECEF->ENU (a=6378137.0, 1/f=298.257223563)',
+        },
+      },
+      sceneContext: {
+        lensMm: activeLensMm,
+        blenderFocalMm,
+        sensorWidthMm: 36.0,
+        pinholeIntrinsics: firstK,
+        resolution,
+        worldTerrain: worldTerrainEnabled,
+        google3DTiles: google3DEnabled,
+        sse: currentSSE,
+        verticalOffsetMeters: currentHeightOffset,
+        tilesets: activeTilesets.map((t) => ({
+          ionAssetId: t.id,
+          name: t.name,
+          visible: t.visible,
+        })),
+        weather: lastWeatherData
+          ? {
+              stationName: lastWeatherData.stationName,
+              condition: lastWeatherData.condition,
+              tempC: lastWeatherData.tempC,
+              cloudCoverPct: lastWeatherData.cloudCoverPct,
+              windSpeedMps: lastWeatherData.windSpeedMps,
+              windDeg: lastWeatherData.windDeg,
+            }
+          : null,
+      },
+      captureRig: {
+        totalViews: poses.length,
+        poses,
+      },
+    };
+  }
+
+  function buildGeoBoxCameraPathJson(
+    box: GeoDrawBoxState,
+    poses: GeoBoxRigPose[],
+    resolution: [number, number]
+  ): Record<string, unknown> {
+    const m = computeGeoBoxMetrics(box);
+    return {
+      schema: 'nodrone-camera-path/1',
+      site: m.name,
+      recordedAt: new Date().toISOString(),
+      quotable: false,
+      mode: 'geo-box-multiview',
+      render: {
+        fps: 30,
+        resolution,
+      },
+      samples: poses.map((p, idx) => ({
+        t: Number((idx / 30).toFixed(4)),
+        lat: p.lat,
+        lon: p.lon,
+        height: p.height,
+        heading: p.heading,
+        pitch: p.pitch,
+        roll: p.roll,
+        fovyDeg: p.fovyDeg,
+      })),
+    };
+  }
+
+  function captureCanvasPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error('Canvas PNG capture returned null blob.'));
+      }, 'image/png');
+    });
+  }
+
+  async function captureGeoBoxStudioBundle(): Promise<void> {
+    if (!viewer?.scene || !geoBox || isCapturingGeoBox || isRenderingPath) return;
+    if (isRecording) {
+      showToast('Stop live recording before capturing a Studio Bundle.', 'error');
+      return;
+    }
+
+    const boxSnapshot = { ...geoBox };
+    const m = computeGeoBoxMetrics(boxSnapshot);
+    const canvas = viewer.scene.canvas as HTMLCanvasElement;
+    const container = el<HTMLDivElement>('cesium-container');
+    if (!container) return;
+
+    const targetW = Math.max(640, canvas.width || 1280);
+    const targetH = Math.max(360, canvas.height || 720);
+    const poses = computeGeoBoxCaptureRig(boxSnapshot, geoBoxCaptureViews, [targetW, targetH]);
+    const total = poses.length;
+
+    stopRenderPathPreview();
+    isCapturingGeoBox = true;
+    geoBoxCaptureCancelled = false;
+    setGeoBoxDrawing(false);
+    setFlightMode('explore');
+    syncGeoBoxUI();
+
+    // Save camera, FOV, render loop, HUD visibility, and draw-box visibility
+    const savedUseDefaultLoop = viewer.useDefaultRenderLoop;
+    const savedCameraPos = viewer.camera.position.clone();
+    const savedHeading = viewer.camera.heading;
+    const savedPitch = viewer.camera.pitch;
+    const savedRoll = viewer.camera.roll;
+    const savedFov =
+      viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number'
+        ? viewer.camera.frustum.fov
+        : null;
+    const savedBoxVisible = geoBox.visible;
+
+    const hudElements = [
+      document.querySelector('header') as HTMLElement | null,
+      flightClusterGauge,
+      boxDrawBanner,
+      cardStage,
+      summonGrid,
+      spotlightTag,
+      el<HTMLElement>('copilot-drawer'),
+      flightHudBanner,
+      recIndicator,
+      document.querySelector('nav') as HTMLElement | null,
+      el<HTMLElement>('btn-recall-hud'),
+    ].filter((node): node is HTMLElement => Boolean(node));
+
+    const savedHudDisplays = hudElements.map((node) => ({
+      node,
+      display: node.style.display,
+    }));
+
+    const outputCanvas = document.createElement('canvas');
+    outputCanvas.width = targetW;
+    outputCanvas.height = targetH;
+    const outputCtx = outputCanvas.getContext('2d');
+    const logoSafetyCache = new Map<string, boolean>();
+    const zipEntries: ZipEntryInput[] = [];
+
+    const updateProgress = (step: number) => {
+      if (renderProgressText) {
+        renderProgressText.textContent = `Capturing Studio view ${step} / ${total} (${m.name})…`;
+      }
+      if (renderProgressBar) {
+        const pct = total > 0 ? Math.min(100, Math.round((step / total) * 100)) : 0;
+        renderProgressBar.style.width = `${pct}%`;
+      }
+    };
+
+    try {
+      // Hide HUD + temporary hide gold wireframe & path overlays so captured PNGs are clean photorealistic views
+      for (const { node } of savedHudDisplays) {
+        node.style.display = 'none';
+      }
+      geoBoxEntities.forEach((ent) => {
+        ent.show = false;
+      });
+      renderPathEntities.forEach((ent) => {
+        ent.show = false;
+      });
+      setMapLabelsTemporarilyHidden(true);
+      if (renderProgressOverlay) {
+        renderProgressOverlay.classList.remove('hidden');
+        renderProgressOverlay.classList.add('flex');
+      }
+      updateProgress(0);
+
+      viewer.useDefaultRenderLoop = false;
+      const encoder = new TextEncoder();
+
+      for (let i = 0; i < poses.length; i++) {
+        if (geoBoxCaptureCancelled) break;
+        const p = poses[i];
+        updateProgress(i + 1);
+
+        if (viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
+          viewer.camera.frustum.fov = computeAppliedFovRad(p.fovyDeg, targetW, targetH);
+        }
+
+        viewer.camera.setView({
+          destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.height),
+          orientation: {
+            heading: Cesium.Math.toRadians(p.heading),
+            pitch: Cesium.Math.toRadians(p.pitch),
+            roll: Cesium.Math.toRadians(p.roll),
+          },
+        });
+
+        await waitForRenderFrameSettled(12000);
+        if (geoBoxCaptureCancelled) break;
+        viewer.scene.render();
+
+        let pngBlob: Blob;
+        if (outputCtx) {
+          outputCtx.clearRect(0, 0, targetW, targetH);
+          outputCtx.drawImage(canvas, 0, 0, targetW, targetH);
+          compositeCreditsOntoFrame(outputCtx, targetW, targetH, container, logoSafetyCache);
+          try {
+            pngBlob = await captureCanvasPngBlob(outputCanvas);
+          } catch {
+            pngBlob = await captureCanvasPngBlob(canvas);
+          }
+        } else {
+          pngBlob = await captureCanvasPngBlob(canvas);
+        }
+
+        const pngBytes = new Uint8Array(await pngBlob.arrayBuffer());
+        zipEntries.push({
+          name: p.fileName,
+          data: pngBytes,
+        });
+      }
+
+      if (!geoBoxCaptureCancelled && zipEntries.length > 0) {
+        const anchorsJson = buildGeoBoxAnchorsJson(boxSnapshot);
+        const cameraMatricesJson = buildGeoBoxCameraMatricesJson(boxSnapshot, poses);
+        const trajectoryJson = buildGeoBoxTrajectoryJson(boxSnapshot, poses, [targetW, targetH]);
+        const bundleManifest = buildSplatStudioManifest(boxSnapshot, poses, [targetW, targetH]);
+        const cameraPathJson = buildGeoBoxCameraPathJson(boxSnapshot, poses, [targetW, targetH]);
+        const geoJson = buildGeoBoxGeoJson(boxSnapshot);
+
+        zipEntries.unshift(
+          {
+            name: 'anchors.json',
+            data: encoder.encode(JSON.stringify(anchorsJson, null, 2)),
+          },
+          {
+            name: 'camera_matrices.json',
+            data: encoder.encode(JSON.stringify(cameraMatricesJson, null, 2)),
+          },
+          {
+            name: 'trajectory.json',
+            data: encoder.encode(JSON.stringify(trajectoryJson, null, 2)),
+          },
+          {
+            name: 'splatthat-bundle.json',
+            data: encoder.encode(JSON.stringify(bundleManifest, null, 2)),
+          },
+          {
+            name: 'camera-path.json',
+            data: encoder.encode(JSON.stringify(cameraPathJson, null, 2)),
+          },
+          {
+            name: 'box-footprint.geojson',
+            data: encoder.encode(JSON.stringify(geoJson, null, 2)),
+          }
+        );
+
+        // Decoupled Sidecar Provenance Registry with cryptographic SHA-256 hashes of every artifact + PNG frame
+        const provenanceJson = await buildGeoBoxProvenanceJson(boxSnapshot, zipEntries);
+        zipEntries.splice(6, 0, {
+          name: 'provenance.json',
+          data: encoder.encode(JSON.stringify(provenanceJson, null, 2)),
+        });
+
+        const zipBlob = buildStoreZipBlob(zipEntries);
+        const slug =
+          m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site-asset';
+        const fileName = `${slug}-splatthat-bundle.zip`;
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+        showToast(`Studio Bundle ready: ${poses.length} views + 7 manifests (${formatFileSizeMb(zipBlob.size)})`);
+        logEvent(
+          `Exported Splat Studio Bundle "${fileName}" (${poses.length} PNG views + anchors.json + camera_matrices.json + trajectory.json + splatthat-bundle.json + provenance.json + camera-path.json + GeoJSON).`,
+          'ok'
+        );
+      } else if (geoBoxCaptureCancelled) {
+        showToast('Studio Bundle capture canceled.');
+        logEvent('Studio Bundle capture canceled by user.', 'warn');
+      }
+    } catch (err: any) {
+      showToast(`Studio Bundle capture failed: ${err?.message || err}`, 'error');
+      logEvent(`Studio Bundle capture error: ${err?.message || err}`, 'error');
+    } finally {
+      // Restore camera, draw-box entities, render loop, and HUD cleanly
+      viewer.camera.setView({
+        destination: savedCameraPos,
+        orientation: {
+          heading: savedHeading,
+          pitch: savedPitch,
+          roll: savedRoll,
+        },
+      });
+      if (savedFov !== null && viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
+        viewer.camera.frustum.fov = savedFov;
+      }
+      viewer.useDefaultRenderLoop = savedUseDefaultLoop;
+      if (geoBox) {
+        geoBox.visible = savedBoxVisible;
+      }
+      geoBoxEntities.forEach((ent) => {
+        ent.show = savedBoxVisible;
+      });
+      renderPathEntities.forEach((ent) => {
+        ent.show = true;
+      });
+      setMapLabelsTemporarilyHidden(false);
+      for (const { node, display } of savedHudDisplays) {
+        node.style.display = display;
+      }
+      if (renderProgressOverlay) {
+        renderProgressOverlay.classList.add('hidden');
+        renderProgressOverlay.classList.remove('flex');
+      }
+      isCapturingGeoBox = false;
+      geoBoxCaptureCancelled = false;
+      syncGeoBoxUI();
     }
   }
 
@@ -2162,6 +4078,301 @@ let cameraPathRemove: (() => void) | null = null;
     }, 900);
   }
 
+  // =========================================================================
+  // Map Labels & Borders Overlay + Live Reverse-Geocoded Location Readout
+  // =========================================================================
+
+  async function ensureMapLabelImageryLayer(): Promise<void> {
+    if (!viewer) return;
+    const shouldShow = mapLabelsEnabled && !mapLabelsTempHidden;
+    if (mapLabelsImageryLayer) {
+      try {
+        if (viewer.imageryLayers.contains(mapLabelsImageryLayer)) {
+          mapLabelsImageryLayer.show = shouldShow;
+          return;
+        }
+      } catch {
+        mapLabelsImageryLayer = null;
+      }
+    }
+    if (mapLabelsImageryLoading) return;
+    mapLabelsImageryLoading = true;
+    const gen = mapLabelsImageryGeneration;
+    try {
+      // Public Esri ArcGIS World Boundaries & Places reference overlay (no API key, transparent RGBA)
+      const provider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
+        'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer'
+      );
+      if (!viewer || gen !== mapLabelsImageryGeneration) return;
+      mapLabelsImageryLayer = viewer.imageryLayers.addImageryProvider(provider);
+      mapLabelsImageryLayer.alpha = 0.92;
+      mapLabelsImageryLayer.show = mapLabelsEnabled && !mapLabelsTempHidden;
+    } catch (err) {
+      console.warn('Map labels tile overlay could not be initialized:', err);
+    } finally {
+      if (gen === mapLabelsImageryGeneration) {
+        mapLabelsImageryLoading = false;
+      }
+    }
+  }
+
+  function updateMapLabelHorizonVisibility(): void {
+    if (!viewer || mapLabelEntities.length === 0) return;
+    if (!mapLabelsEnabled || mapLabelsTempHidden) {
+      for (const item of mapLabelEntities) {
+        item.entity.show = false;
+      }
+      return;
+    }
+
+    let occluder: any = null;
+    try {
+      let camPos = viewer.camera.positionWC;
+      const carto = viewer.camera.positionCartographic;
+      if (carto && carto.height < 15) {
+        camPos = Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, 50);
+      }
+      occluder = new Cesium.EllipsoidalOccluder(Cesium.Ellipsoid.WGS84, camPos);
+    } catch {
+      occluder = null;
+    }
+
+    for (const item of mapLabelEntities) {
+      item.entity.show = occluder ? occluder.isPointVisible(item.position) : true;
+    }
+  }
+
+  function ensureMapLabelEntities(): void {
+    if (!viewer?.entities || mapLabelEntities.length > 0) return;
+
+    const countryDist = new Cesium.DistanceDisplayCondition(900_000, 28_000_000);
+    const stateDist = new Cesium.DistanceDisplayCondition(120_000, 4_200_000);
+    const cityDist = new Cesium.DistanceDisplayCondition(1_200, 1_200_000);
+    const countryColor = Cesium.Color.fromCssColorString('#f3dc9f').withAlpha(0.92);
+    const stateColor = Cesium.Color.fromCssColorString('#cbd5e1').withAlpha(0.88);
+    const cityColor = Cesium.Color.fromCssColorString('#ffffff').withAlpha(0.95);
+    const outlineDark = Cesium.Color.fromCssColorString('#06080d').withAlpha(0.92);
+
+    for (const p of WORLD_COUNTRIES) {
+      const position = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 5000);
+      const entity = viewer.entities.add({
+        show: false,
+        position,
+        label: {
+          text: p.name,
+          font: '600 12px "JetBrains Mono", monospace',
+          fillColor: countryColor,
+          outlineColor: outlineDark,
+          outlineWidth: 3,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          distanceDisplayCondition: countryDist,
+          disableDepthTestDistance: 0,
+        },
+      });
+      mapLabelEntities.push({ entity, position });
+    }
+
+    for (const p of US_STATES) {
+      const position = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 2500);
+      const entity = viewer.entities.add({
+        show: false,
+        position,
+        label: {
+          text: p.name.toUpperCase(),
+          font: '500 10.5px "JetBrains Mono", monospace',
+          fillColor: stateColor,
+          outlineColor: outlineDark,
+          outlineWidth: 2.5,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          distanceDisplayCondition: stateDist,
+          disableDepthTestDistance: 0,
+        },
+      });
+      mapLabelEntities.push({ entity, position });
+    }
+
+    for (const p of MAJOR_CITIES) {
+      const position = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 400);
+      const entity = viewer.entities.add({
+        show: false,
+        position,
+        point: {
+          pixelSize: 4.5,
+          color: Cesium.Color.fromCssColorString('#e7cb88'),
+          outlineColor: outlineDark,
+          outlineWidth: 1.5,
+          distanceDisplayCondition: cityDist,
+          disableDepthTestDistance: 35_000,
+        },
+        label: {
+          text: p.sub ? `${p.name}, ${p.sub}` : p.name,
+          font: '600 11px "Plus Jakarta Sans", system-ui, sans-serif',
+          fillColor: cityColor,
+          outlineColor: outlineDark,
+          outlineWidth: 3,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          pixelOffset: new Cesium.Cartesian2(7, 0),
+          distanceDisplayCondition: cityDist,
+          disableDepthTestDistance: 35_000,
+        },
+      });
+      mapLabelEntities.push({ entity, position });
+    }
+  }
+
+  function setMapLabelsTemporarilyHidden(hidden: boolean): void {
+    mapLabelsTempHidden = hidden;
+    const visible = !hidden && mapLabelsEnabled;
+    if (mapLabelsImageryLayer) {
+      mapLabelsImageryLayer.show = visible;
+    }
+    updateMapLabelHorizonVisibility();
+  }
+
+  function setMapLabelsEnabled(enabled: boolean, silent = false): void {
+    mapLabelsEnabled = enabled;
+    void ensureMapLabelImageryLayer();
+    ensureMapLabelEntities();
+    if (mapLabelsImageryLayer) {
+      mapLabelsImageryLayer.show = enabled && !mapLabelsTempHidden;
+    }
+    updateMapLabelHorizonVisibility();
+    updateLayerButton('btn-toggle-map-labels', 'status-map-labels', enabled);
+    const hudBtn = el<HTMLButtonElement>('btn-hud-map-labels');
+    if (hudBtn) {
+      hudBtn.setAttribute('data-active', String(enabled));
+    }
+    if (!silent) {
+      showToast(enabled ? 'Map Labels & Borders Overlay ON' : 'Map Labels Overlay OFF');
+      logEvent(enabled ? 'Map Labels & Borders overlay enabled.' : 'Map Labels overlay hidden.', 'info');
+    }
+    notifyUiStateChanged();
+  }
+
+  function formatLocationForAltitude(
+    data: NonNullable<typeof lastReverseData>,
+    altMeters: number
+  ): string {
+    if (data.ocean && !data.country && !data.city) {
+      return data.ocean;
+    }
+    const regionShort = data.regionCode || data.region;
+    const countryShort = data.countryCode || data.country;
+
+    // High orbital altitude (> 2,200 km): show Country
+    if (altMeters > 2_200_000) {
+      return data.country || data.ocean || 'Earth Orbit';
+    }
+    // Regional altitude (65 km – 2,200 km): show State / Region · Country
+    if (altMeters > 65_000) {
+      if (data.region && countryShort) return `${data.region} · ${countryShort}`;
+      return data.region || data.country || data.ocean || 'Earth View';
+    }
+    // City / Street / Building altitude (< 65 km): show City, State · Country
+    if (data.city && regionShort && countryShort) {
+      return `${data.city}, ${regionShort} · ${countryShort}`;
+    }
+    if (data.city && countryShort) {
+      return `${data.city} · ${countryShort}`;
+    }
+    if (data.region && countryShort) {
+      return `${data.region} · ${countryShort}`;
+    }
+    return data.country || data.ocean || 'Unknown Region';
+  }
+
+  function updateHudLocationDisplay(): void {
+    const locEl = el<HTMLSpanElement>('hud-location-text');
+    if (!locEl || !lastReverseData) return;
+    const alt = viewer?.camera?.positionCartographic?.height ?? 500;
+    locEl.textContent = formatLocationForAltitude(lastReverseData, alt);
+  }
+
+  async function refreshLiveLocationReadout(force = false): Promise<void> {
+    if (!viewer?.scene || isRenderingPath || isCapturingGeoBox) return;
+    const canvas = viewer.scene.canvas;
+    const camCarto = viewer.camera?.positionCartographic;
+    const camAlt = camCarto?.height ?? 0;
+
+    let lat: number | null = null;
+    let lon: number | null = null;
+
+    if (canvas.clientWidth > 0 && canvas.clientHeight > 0) {
+      const centerPx = new Cesium.Cartesian2(canvas.clientWidth * 0.5, canvas.clientHeight * 0.5);
+      if (camAlt > 50_000) {
+        // High altitude / orbital view: intersect WGS84 ellipsoid cleanly without depth-buffer artifacts
+        const ellipPos = viewer.camera.pickEllipsoid(centerPx, Cesium.Ellipsoid.WGS84);
+        if (ellipPos) {
+          const c = Cesium.Cartographic.fromCartesian(ellipPos);
+          if (c) {
+            lat = Cesium.Math.toDegrees(c.latitude);
+            lon = Cesium.Math.toDegrees(c.longitude);
+          }
+        }
+      } else {
+        const picked = pickGeoSurfacePoint(centerPx);
+        if (picked && Number.isFinite(picked.lat) && Number.isFinite(picked.lon)) {
+          lat = picked.lat;
+          lon = picked.lon;
+        }
+      }
+    }
+
+    if ((lat === null || lon === null) && camCarto) {
+      lat = Cesium.Math.toDegrees(camCarto.latitude);
+      lon = Cesium.Math.toDegrees(camCarto.longitude);
+    }
+    if (lat === null || lon === null || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return;
+    }
+
+    const movedEnough =
+      force ||
+      !Number.isFinite(lastReverseLat) ||
+      Math.abs(lat - lastReverseLat) > 0.008 ||
+      Math.abs(lon - lastReverseLon) > 0.008;
+
+    if (!movedEnough) {
+      updateHudLocationDisplay();
+      return;
+    }
+
+    lastReverseLat = lat;
+    lastReverseLon = lon;
+    try {
+      const resp = await fetch(`/api/maps/reverse?lat=${encodeURIComponent(lat.toFixed(5))}&lon=${encodeURIComponent(lon.toFixed(5))}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      lastReverseData = {
+        city: data.city ?? null,
+        region: data.region ?? null,
+        regionCode: data.regionCode ?? null,
+        country: data.country ?? null,
+        countryCode: data.countryCode ?? null,
+        ocean: data.ocean ?? null,
+      };
+      updateHudLocationDisplay();
+    } catch {
+      // Keep last known location silently on transient network error
+    }
+  }
+
+  function scheduleLiveLocationLookup(): void {
+    if (reverseGeocodeTimer !== null) {
+      window.clearTimeout(reverseGeocodeTimer);
+    }
+    reverseGeocodeTimer = window.setTimeout(() => {
+      reverseGeocodeTimer = null;
+      void refreshLiveLocationReadout(false);
+    }, 600);
+  }
+
   /**
    * Initializes the CesiumJS 1.147 Viewer on a guaranteed WGS84 Globe with public satellite imagery.
    */
@@ -2224,10 +4435,14 @@ let cameraPathRemove: (() => void) | null = null;
 
       // Initial panel & HUD visibility is already synced synchronously before async globe setup.
 
-      // Scene hooks: Pre-update for Drone Flight, Post-render for Telemetry, MoveEnd for Weather Sync
+      // Scene hooks: Pre-update for Drone Flight, Post-render for Telemetry, Camera listeners for Horizon Culling, Weather & Location Sync
+      viewer.camera.percentageChanged = 0.05;
       viewer.scene.preUpdate.addEventListener(handlePreUpdate);
       viewer.scene.postRender.addEventListener(updateTelemetry);
+      viewer.camera.changed.addEventListener(updateMapLabelHorizonVisibility);
+      viewer.camera.moveEnd.addEventListener(updateMapLabelHorizonVisibility);
       viewer.camera.moveEnd.addEventListener(scheduleCameraWeatherSync);
+      viewer.camera.moveEnd.addEventListener(scheduleLiveLocationLookup);
 
       // Default starting camera over the Continental US
       viewer.camera.setView({
@@ -2238,6 +4453,11 @@ let cameraPathRemove: (() => void) | null = null;
           roll: 0.0,
         },
       });
+
+      // Enable dual-layer Map Labels (Esri World Boundaries & Places + horizon-culled 3D labels over 3D tiles)
+      setMapLabelsEnabled(true, true);
+      updateMapLabelHorizonVisibility();
+      void refreshLiveLocationReadout(true);
 
       applyLensPreset(activeLensMm);
       logEvent('CesiumJS 1.147 WGS84 Globe initialized.', 'ok');
@@ -2287,8 +4507,14 @@ let cameraPathRemove: (() => void) | null = null;
         const aerialProvider = await Cesium.IonImageryProvider.fromAssetId(2);
         viewer.imageryLayers.removeAll();
         viewer.imageryLayers.addImageryProvider(aerialProvider);
+        mapLabelsImageryGeneration += 1;
+        mapLabelsImageryLayer = null;
+        mapLabelsImageryLoading = false;
         if (activeWeatherLayer !== 'off') {
           setWeatherTileLayer(activeWeatherLayer, true);
+        }
+        if (mapLabelsEnabled) {
+          void ensureMapLabelImageryLayer();
         }
       } catch {
         logEvent('Token does not include Bing Aerial (Asset #2)—keeping satellite base layer.', 'warn');
@@ -3472,6 +5698,12 @@ let cameraPathRemove: (() => void) | null = null;
     // Global Layers
     el<HTMLButtonElement>('btn-toggle-terrain')?.addEventListener('click', toggleWorldTerrain);
     el<HTMLButtonElement>('btn-toggle-google3d')?.addEventListener('click', toggleGoogle3DTiles);
+    el<HTMLButtonElement>('btn-toggle-map-labels')?.addEventListener('click', () => {
+      setMapLabelsEnabled(!mapLabelsEnabled);
+    });
+    el<HTMLButtonElement>('btn-hud-map-labels')?.addEventListener('click', () => {
+      setMapLabelsEnabled(!mapLabelsEnabled);
+    });
 
     // Real-Time Weather Overlay Controls
     document.querySelectorAll<HTMLButtonElement>('.weather-layer-btn').forEach((btn) => {
@@ -3641,6 +5873,12 @@ let cameraPathRemove: (() => void) | null = null;
     btnRenderFrames?.addEventListener('click', () => {
       renderLoadedPathFrames();
     });
+    el<HTMLButtonElement>('btn-path-jump')?.addEventListener('click', () => {
+      flyToLoadedRenderPathStart(1.2);
+    });
+    el<HTMLButtonElement>('btn-path-preview')?.addEventListener('click', () => {
+      toggleRenderPathPreview();
+    });
     btnRenderToFolder?.addEventListener('click', async () => {
       if (!loadedRenderPath || isRenderingPath || !supportsDirectoryPicker) return;
       if (isRecording) {
@@ -3665,6 +5903,9 @@ let cameraPathRemove: (() => void) | null = null;
     el<HTMLButtonElement>('btn-cancel-render')?.addEventListener('click', () => {
       if (isRenderingPath) {
         renderPathCancelled = true;
+      }
+      if (isCapturingGeoBox) {
+        geoBoxCaptureCancelled = true;
       }
     });
 
@@ -3719,6 +5960,149 @@ let cameraPathRemove: (() => void) | null = null;
     });
     el<HTMLButtonElement>('btn-measure-clear')?.addEventListener('click', clearMeasurements);
 
+    // Geo-Coordinate Draw Box Controls
+    el<HTMLButtonElement>('btn-box-draw')?.addEventListener('click', () => {
+      setGeoBoxDrawing(!geoBoxDrawing);
+    });
+    el<HTMLButtonElement>('btn-box-cancel-draw')?.addEventListener('click', () => {
+      setGeoBoxDrawing(false);
+      setActiveCard('box');
+    });
+    el<HTMLButtonElement>('btn-box-from-view')?.addEventListener('click', () => {
+      dropGeoBoxAtView();
+    });
+    el<HTMLButtonElement>('btn-box-frame')?.addEventListener('click', () => {
+      frameGeoBox();
+    });
+    el<HTMLButtonElement>('btn-box-clear')?.addEventListener('click', () => {
+      clearGeoBox();
+    });
+    el<HTMLButtonElement>('btn-box-visible')?.addEventListener('click', () => {
+      if (!geoBox) return;
+      geoBox.visible = !geoBox.visible;
+      refreshGeoBoxGraphics();
+    });
+
+    el<HTMLInputElement>('input-box-name')?.addEventListener('input', (e) => {
+      if (!geoBox) return;
+      geoBox.name = (e.target as HTMLInputElement).value;
+      notifyUiStateChanged();
+    });
+
+    const handleManualBoxBoundsEdit = () => {
+      const s = parseFloat(el<HTMLInputElement>('input-box-south')?.value ?? '');
+      const n = parseFloat(el<HTMLInputElement>('input-box-north')?.value ?? '');
+      const w = parseFloat(el<HTMLInputElement>('input-box-west')?.value ?? '');
+      const eastVal = parseFloat(el<HTMLInputElement>('input-box-east')?.value ?? '');
+      if (!Number.isFinite(s) || !Number.isFinite(n) || !Number.isFinite(w) || !Number.isFinite(eastVal)) {
+        return;
+      }
+      if (Math.abs(n - s) < 0.00001 || Math.abs(eastVal - w) < 0.00001) return;
+      if (!geoBox) {
+        dropGeoBoxAtView({ south: s, north: n, west: w, east: eastVal });
+      } else {
+        geoBox.south = Math.min(s, n);
+        geoBox.north = Math.max(s, n);
+        geoBox.west = Math.min(w, eastVal);
+        geoBox.east = Math.max(w, eastVal);
+        refreshGeoBoxGraphics();
+      }
+    };
+    ['input-box-south', 'input-box-north', 'input-box-west', 'input-box-east'].forEach((id) => {
+      el<HTMLInputElement>(id)?.addEventListener('change', handleManualBoxBoundsEdit);
+    });
+
+    el<HTMLInputElement>('slider-box-base')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      const valEl = el<HTMLSpanElement>('val-box-base');
+      if (valEl) valEl.textContent = `${v >= 0 ? '+' : ''}${Math.round(v)} m`;
+      if (!geoBox) return;
+      geoBox.baseOffsetMeters = v;
+      refreshGeoBoxGraphics();
+    });
+
+    el<HTMLInputElement>('slider-box-height')?.addEventListener('input', (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      const valEl = el<HTMLSpanElement>('val-box-height');
+      if (valEl) valEl.textContent = `${Math.round(v)} m`;
+      if (!geoBox) return;
+      geoBox.heightMeters = Math.max(4, v);
+      refreshGeoBoxGraphics();
+    });
+
+    document.querySelectorAll<HTMLButtonElement>('.box-views-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const count = Number(btn.dataset.boxViews || 12);
+        if (Number.isFinite(count) && count >= 4) {
+          geoBoxCaptureViews = count;
+          syncGeoBoxUI();
+        }
+      });
+    });
+
+    el<HTMLButtonElement>('btn-box-capture-bundle')?.addEventListener('click', () => {
+      void captureGeoBoxStudioBundle();
+    });
+
+    el<HTMLButtonElement>('btn-box-export-json')?.addEventListener('click', () => {
+      if (!geoBox) return;
+      const canvas = viewer?.scene?.canvas as HTMLCanvasElement | undefined;
+      const res: [number, number] = [canvas?.width || 1280, canvas?.height || 720];
+      const poses = computeGeoBoxCaptureRig(geoBox, geoBoxCaptureViews, res);
+      const manifest = buildSplatStudioManifest(geoBox, poses, res);
+      const slug =
+        geoBox.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site-asset';
+      const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${slug}-splatthat-bundle.json`;
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showToast('Exported Splat Studio Bundle JSON (OpenCV/OpenGL c2w + K + Quat).');
+    });
+
+    el<HTMLButtonElement>('btn-box-export-geojson')?.addEventListener('click', () => {
+      if (!geoBox) return;
+      const geoJson = buildGeoBoxGeoJson(geoBox);
+      const slug =
+        geoBox.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site-asset';
+      const blob = new Blob([JSON.stringify(geoJson, null, 2)], { type: 'application/geo+json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${slug}-footprint.geojson`;
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showToast('Exported WGS84 GeoJSON footprint.');
+    });
+
+    el<HTMLButtonElement>('btn-box-copy-coords')?.addEventListener('click', async () => {
+      if (!geoBox) return;
+      const m = computeGeoBoxMetrics(geoBox);
+      const payload = JSON.stringify(
+        {
+          name: m.name,
+          south: m.south,
+          north: m.north,
+          west: m.west,
+          east: m.east,
+          center: [m.centerLat, m.centerLon],
+          baseEllipsoidalMeters: m.baseEllipsoidalMeters,
+          ceilingEllipsoidalMeters: m.ceilingEllipsoidalMeters,
+          dimensionsMeters: [m.widthMeters, m.depthMeters, m.heightMeters],
+        },
+        null,
+        2
+      );
+      try {
+        await navigator.clipboard.writeText(payload);
+        showToast('Geo-Box WGS84 coordinates copied.');
+      } catch {
+        showToast('Clipboard blocked by browser permissions.', 'error');
+      }
+    });
+
     // Home / Globe View
     el<HTMLButtonElement>('btn-home')?.addEventListener('click', () => {
       setFlightMode('explore');
@@ -3764,9 +6148,13 @@ let cameraPathRemove: (() => void) | null = null;
         const modalWasOpen =
           (tokenModal && !tokenModal.classList.contains('hidden')) ||
           (clipModal && !clipModal.classList.contains('hidden'));
-        const modeWasActive = flightMode !== 'explore' || measureMode !== 'off';
+        const modeWasActive = flightMode !== 'explore' || measureMode !== 'off' || geoBoxDrawing;
         if (flightMode !== 'explore') setFlightMode('explore');
         if (measureMode !== 'off') setMeasureMode('off');
+        if (geoBoxDrawing) {
+          setGeoBoxDrawing(false);
+          setActiveCard('box');
+        }
         closeTokenModal();
         closeClipModal();
         if (!modalWasOpen && !modeWasActive && (activeCard !== null || hudMode === 'summon')) {
@@ -3819,6 +6207,7 @@ let cameraPathRemove: (() => void) | null = null;
     'world',
     'flight',
     'capture',
+    'box',
     'site',
     'weather',
     'telemetry',
@@ -3848,6 +6237,18 @@ let cameraPathRemove: (() => void) | null = null;
     'btn-load-render-path': 'capture',
     'btn-render-frames': 'capture',
     'btn-render-to-folder': 'capture',
+    'input-box-name': 'box',
+    'btn-box-draw': 'box',
+    'btn-box-from-view': 'box',
+    'btn-box-frame': 'box',
+    'btn-box-visible': 'box',
+    'btn-box-clear': 'box',
+    'slider-box-base': 'box',
+    'slider-box-height': 'box',
+    'btn-box-capture-bundle': 'box',
+    'btn-box-export-json': 'box',
+    'btn-box-export-geojson': 'box',
+    'btn-box-copy-coords': 'box',
     'input-site-title': 'site',
     'input-source-crs': 'site',
     'btn-load-manifest': 'site',
@@ -4131,6 +6532,18 @@ let cameraPathRemove: (() => void) | null = null;
         { id: 'btn-render-to-folder', label: 'Render to Folder', card: 'capture', disabled: !loadedRenderPath || isRenderingPath || !supportsDirectoryPicker },
       ];
     }
+    if (activeCard === 'box') {
+      const m = geoBox ? computeGeoBoxMetrics(geoBox) : null;
+      return [
+        { id: 'btn-box-draw', label: 'Draw on Globe', card: 'box', active: geoBoxDrawing },
+        { id: 'btn-box-from-view', label: 'Drop Box at View', card: 'box' },
+        { id: 'btn-box-frame', label: 'Frame Geo-Box', card: 'box', disabled: !geoBox },
+        { id: 'btn-box-capture-bundle', label: 'Capture Studio Bundle (ZIP)', card: 'box', disabled: !geoBox || isCapturingGeoBox, value: `${geoBoxCaptureViews} views` },
+        { id: 'btn-box-export-json', label: 'Export Bundle JSON', card: 'box', disabled: !geoBox },
+        { id: 'btn-box-export-geojson', label: 'Export GeoJSON', card: 'box', disabled: !geoBox },
+        { id: 'slider-box-height', label: 'Ceiling Height', card: 'box', value: m ? `${m.heightMeters} m` : '60 m' },
+      ];
+    }
     if (activeCard === 'site') {
       return [
         { id: 'btn-load-manifest', label: 'Load Manifest JSON', card: 'site' },
@@ -4222,6 +6635,7 @@ let cameraPathRemove: (() => void) | null = null;
             updatedAt: lastWeatherData.updatedAt,
           }
         : null,
+      geoBox: geoBox ? computeGeoBoxMetrics(geoBox) : null,
       uiState,
     };
   }
@@ -4535,6 +6949,31 @@ let cameraPathRemove: (() => void) | null = null;
           const controlId = String(args.controlId || '');
           const note = typeof args.note === 'string' ? args.note : undefined;
           return highlightControl(controlId, note);
+        }
+
+        case 'setGeoBox': {
+          const snap = dropGeoBoxAtView({
+            name: typeof args.name === 'string' ? args.name : undefined,
+            centerLat: args.centerLat !== undefined ? Number(args.centerLat) : undefined,
+            centerLon: args.centerLon !== undefined ? Number(args.centerLon) : undefined,
+            widthMeters: args.widthMeters !== undefined ? Number(args.widthMeters) : undefined,
+            depthMeters: args.depthMeters !== undefined ? Number(args.depthMeters) : undefined,
+            south: args.south !== undefined ? Number(args.south) : undefined,
+            north: args.north !== undefined ? Number(args.north) : undefined,
+            west: args.west !== undefined ? Number(args.west) : undefined,
+            east: args.east !== undefined ? Number(args.east) : undefined,
+            heightMeters: args.heightMeters !== undefined ? Number(args.heightMeters) : undefined,
+            baseOffsetMeters: args.baseOffsetMeters !== undefined ? Number(args.baseOffsetMeters) : undefined,
+            frame: args.frame !== false,
+          });
+          if (!snap) return { ok: false, error: 'Could not determine 3D surface coordinates for Geo-Box.' };
+          setActiveCard('box');
+          return { ok: true, geoBox: snap };
+        }
+
+        case 'clearGeoBox': {
+          clearGeoBox();
+          return { ok: true };
         }
 
         case 'webSearch': {

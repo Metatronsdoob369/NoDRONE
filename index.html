@@ -46,6 +46,15 @@
     <span id="flight-hud-hint" class="text-[11px] font-mono text-slate-300/80 whitespace-nowrap">W/A/S/D Move · Q/E Yaw · Space/Shift Alt</span>
   </div>
 
+  <!-- Geo-Coordinate Draw Box Active Picking Banner -->
+  <div id="box-draw-banner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 glass-bar border-[#d4af63]/50 rounded-xl px-4 py-2">
+    <span class="w-1.5 h-1.5 rounded-full bg-[#e7cb88]"></span>
+    <span id="box-draw-banner-text" class="text-xs font-mono text-[#f6e6be] whitespace-nowrap">Click corner 1 on the 3D globe or tileset</span>
+    <span class="text-white/20" aria-hidden="true">|</span>
+    <span class="text-[11px] font-mono text-slate-400 whitespace-nowrap hidden sm:inline">Right-click or Esc to cancel</span>
+    <button id="btn-box-cancel-draw" type="button" class="chrono-pusher ml-1 px-2.5 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap">Cancel</button>
+  </div>
+
   <!-- Active Recording Telemetry Strip -->
   <div id="rec-indicator" class="hidden absolute top-16 sm:top-4 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 glass-bar border-red-500/45 rounded-xl px-4 py-2">
     <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
@@ -85,7 +94,21 @@
           <span id="ion-status-text" class="truncate max-w-[165px]">Satellite Globe</span>
         </div>
       </div>
+      <div class="h-6 w-px bg-white/12 mx-0.5 shrink-0 hidden sm:block"></div>
+      <div class="hidden sm:flex items-center gap-1.5 min-w-0 max-w-[230px]" title="Live reverse-geocoded location under camera view">
+        <svg class="w-3.5 h-3.5 text-[#d4af63] shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+        </svg>
+        <span id="hud-location-text" class="text-[11px] font-mono text-slate-200 truncate">Locating…</span>
+      </div>
       <div class="h-6 w-px bg-white/12 mx-0.5 shrink-0"></div>
+      <button id="btn-hud-map-labels" type="button" data-active="true" title="Toggle City, State, Country & Road Map Labels Overlay" class="chrono-pusher flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg shrink-0 cursor-pointer whitespace-nowrap">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.158.69.158 1.006 0z" />
+        </svg>
+        <span class="hidden md:inline">Labels</span>
+      </button>
       <button id="btn-open-token" type="button" class="chrono-pusher chrono-pusher-gold flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg shrink-0 cursor-pointer whitespace-nowrap">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
@@ -293,34 +316,48 @@
         </div>
         <button type="button" data-card-done class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap">Done</button>
       </div>
-      <div class="grid grid-cols-2 gap-2.5">
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
         <button type="button" data-summon-card="world" class="chrono-pusher rounded-lg p-3 text-left cursor-pointer space-y-1">
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold tracking-wide text-white">World</span>
             <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#d4af63]">01</span>
           </div>
-          <div class="text-[11px] font-mono text-slate-400">3DGS · Layers · LOD · Coords</div>
+          <div class="text-[11px] font-mono text-slate-400">3DGS · Layers · Coords</div>
         </button>
         <button type="button" data-summon-card="flight" class="chrono-pusher rounded-lg p-3 text-left cursor-pointer space-y-1">
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold tracking-wide text-white">Flight</span>
             <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#d4af63]">02</span>
           </div>
-          <div class="text-[11px] font-mono text-slate-400">WASD · Orbit · Speed · Lens</div>
+          <div class="text-[11px] font-mono text-slate-400">WASD · Orbit · Lens</div>
         </button>
         <button type="button" data-summon-card="capture" class="chrono-pusher rounded-lg p-3 text-left cursor-pointer space-y-1">
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold tracking-wide text-white">Capture</span>
             <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#d4af63]">03</span>
           </div>
-          <div class="text-[11px] font-mono text-slate-400">Record · 360° · Render Path</div>
+          <div class="text-[11px] font-mono text-slate-400">Record · 360° · Render</div>
+        </button>
+        <button type="button" data-summon-card="box" class="chrono-pusher rounded-lg p-3 text-left cursor-pointer space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold tracking-wide text-white">Geo-Box</span>
+            <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#d4af63]">04</span>
+          </div>
+          <div class="text-[11px] font-mono text-slate-400">Draw Bounds · Studio ZIP</div>
         </button>
         <button type="button" data-summon-card="site" class="chrono-pusher rounded-lg p-3 text-left cursor-pointer space-y-1">
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold tracking-wide text-white">Site</span>
-            <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#d4af63]">04</span>
+            <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#d4af63]">05</span>
           </div>
           <div class="text-[11px] font-mono text-slate-400">Manifest · Views · Measure</div>
+        </button>
+        <button type="button" data-summon-card="weather" class="chrono-pusher rounded-lg p-3 text-left cursor-pointer space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold tracking-wide text-white">Weather</span>
+            <span class="text-[10px] font-mono uppercase tracking-[0.12em] text-[#d4af63]">06</span>
+          </div>
+          <div class="text-[11px] font-mono text-slate-400">Wind Dial · Radar · 3D</div>
         </button>
       </div>
     </div>
@@ -357,6 +394,10 @@
             <button id="btn-toggle-google3d" type="button" data-active="false" class="chrono-pusher px-2.5 py-2 rounded-lg text-left cursor-pointer flex items-center justify-between gap-1">
               <span class="text-[11px] font-semibold whitespace-nowrap">Google 3D</span>
               <span id="status-google3d" class="text-[10px] font-mono text-slate-400">Off</span>
+            </button>
+            <button id="btn-toggle-map-labels" type="button" data-active="true" class="chrono-pusher col-span-2 px-2.5 py-1.5 rounded-lg text-left cursor-pointer flex items-center justify-between gap-1">
+              <span class="text-[11px] font-semibold whitespace-nowrap">Map Labels &amp; Borders Overlay</span>
+              <span id="status-map-labels" class="text-[10px] font-mono text-emerald-300">On</span>
             </button>
           </div>
 
@@ -529,6 +570,13 @@
             <button id="btn-load-render-path" type="button" class="chrono-pusher px-2.5 py-1.5 rounded-md text-xs font-medium cursor-pointer whitespace-nowrap">Load Path</button>
             <button id="btn-render-frames" type="button" disabled class="glass-btn px-2.5 py-1.5 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 disabled:opacity-40 disabled:cursor-not-allowed border border-emerald-400/40 text-xs font-semibold text-emerald-200 cursor-pointer whitespace-nowrap">Render Frames</button>
           </div>
+          <div class="grid grid-cols-2 gap-1.5">
+            <button id="btn-path-jump" type="button" disabled class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Jump to Start</button>
+            <button id="btn-path-preview" type="button" disabled data-active="false" class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Preview Path</button>
+          </div>
+          <div class="text-[10px] font-mono text-slate-400/90 leading-snug">
+            Accepts: <span class="text-slate-300">camera-path.json</span> · <span class="text-slate-300">GES .json</span> · <span class="text-slate-300">camera_matrices.json</span> · <span class="text-slate-300">splatthat-bundle.json</span>
+          </div>
           <button id="btn-render-to-folder" type="button" disabled class="glass-btn hidden w-full py-1.5 rounded-md bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-40 disabled:cursor-not-allowed border border-sky-400/40 text-xs font-semibold text-sky-200 cursor-pointer whitespace-nowrap">Render to Folder</button>
           <div id="render-zip-parts-list" class="hidden space-y-1.5"></div>
         </div>
@@ -541,7 +589,117 @@
       </div>
     </section>
 
-    <!-- CARD 04: SITE (Manifest JSON, Camera Bookmarks, 3D Surface Measurement) -->
+    <!-- CARD 04: GEO-BOX (Interactive 3D Bounding Box & Splat Studio Capture Bundle) -->
+    <section id="card-box" data-card="box" data-tucked="true" aria-hidden="true" class="tuck-panel tuck-card hidden pointer-events-auto w-full max-w-[47rem] max-h-[60vh] overflow-y-auto glass-panel chrono-card rounded-xl p-3.5 space-y-3">
+      <div class="flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-[10px] font-mono text-[#d4af63]">04</span>
+          <h2 class="text-[11px] font-mono uppercase tracking-[0.16em] text-slate-100 whitespace-nowrap">Geo-Coordinate Draw Box</h2>
+          <span class="text-white/20" aria-hidden="true">·</span>
+          <span id="box-status" class="text-[11px] font-mono text-slate-400 truncate">No box</span>
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button id="btn-box-visible" type="button" disabled data-active="true" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Visible</button>
+          <button id="btn-box-frame" type="button" disabled class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Frame</button>
+          <button id="btn-box-clear" type="button" disabled class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium text-slate-400 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Clear</button>
+          <button type="button" data-card-done class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap">Done</button>
+        </div>
+      </div>
+
+      <!-- Asset Label & Draw Actions -->
+      <div class="flex flex-wrap sm:flex-nowrap items-center gap-1.5">
+        <input id="input-box-name" type="text" value="Site Asset Mesh" placeholder="Asset / Mesh Name..." class="flex-1 min-w-[140px] glass-input rounded-lg px-2.5 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none" />
+        <button id="btn-box-draw" type="button" data-active="false" class="chrono-pusher chrono-pusher-gold px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0">Draw on Globe</button>
+        <button id="btn-box-from-view" type="button" class="chrono-pusher px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0">Drop at View</button>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <!-- Left Column: Live Geometry Readout & Editable WGS84 Bounds -->
+        <div class="space-y-2.5">
+          <div class="grid grid-cols-2 gap-1.5">
+            <div class="chrono-dial rounded-lg p-2">
+              <div class="text-[9px] font-mono uppercase tracking-[0.12em] text-slate-400">Footprint</div>
+              <div id="box-dim-readout" class="text-xs font-mono font-semibold text-white tabular-nums mt-0.5">-- × -- m</div>
+              <div id="box-area-readout" class="text-[10px] font-mono text-slate-400 tabular-nums">-- m²</div>
+            </div>
+            <div class="chrono-dial rounded-lg p-2">
+              <div class="text-[9px] font-mono uppercase tracking-[0.12em] text-slate-400">Envelope</div>
+              <div id="box-alt-readout" class="text-xs font-mono font-semibold text-[#e7cb88] tabular-nums mt-0.5">-- → -- m</div>
+              <div id="box-center-readout" class="text-[10px] font-mono text-slate-400 tabular-nums truncate">--°, --°</div>
+            </div>
+          </div>
+
+          <div class="glass-well rounded-lg p-2.5 space-y-1.5">
+            <div class="flex items-center justify-between text-[10px] font-mono uppercase tracking-[0.12em]">
+              <span class="text-slate-400">Drag Corners (XY) · Drag ↕ TOP / ↕ BASE (Z)</span>
+            </div>
+            <div class="grid grid-cols-2 gap-1.5">
+              <div>
+                <label for="input-box-south" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">South Lat</label>
+                <input id="input-box-south" type="number" step="0.00005" placeholder="33.501500" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
+              </div>
+              <div>
+                <label for="input-box-north" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">North Lat</label>
+                <input id="input-box-north" type="number" step="0.00005" placeholder="33.502700" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
+              </div>
+              <div>
+                <label for="input-box-west" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">West Lon</label>
+                <input id="input-box-west" type="number" step="0.00005" placeholder="-82.023300" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
+              </div>
+              <div>
+                <label for="input-box-east" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">East Lon</label>
+                <input id="input-box-east" type="number" step="0.00005" placeholder="-82.021900" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Column: Vertical Envelope Sliders & Splat Studio Handoff Export -->
+        <div class="space-y-2.5 flex flex-col justify-between">
+          <div class="glass-well rounded-lg p-2.5 space-y-2">
+            <div>
+              <div class="flex justify-between text-[11px] font-mono mb-0.5">
+                <span class="text-slate-400 uppercase tracking-[0.08em]">Base Offset</span>
+                <span id="val-box-base" class="text-[#e7cb88] tabular-nums">0 m</span>
+              </div>
+              <input id="slider-box-base" type="range" min="-50" max="250" step="1" value="0" class="chrono-slider" />
+            </div>
+            <div>
+              <div class="flex justify-between text-[11px] font-mono mb-0.5">
+                <span class="text-slate-400 uppercase tracking-[0.08em]">Ceiling Height</span>
+                <span id="val-box-height" class="text-[#e7cb88] tabular-nums">25 m</span>
+              </div>
+              <input id="slider-box-height" type="range" min="4" max="500" step="1" value="25" class="chrono-slider" />
+            </div>
+            <div class="pt-0.5">
+              <div class="flex items-center justify-between text-[10px] font-mono mb-1">
+                <span class="text-slate-400 uppercase tracking-[0.08em]">Multi-Angle Rig</span>
+                <span id="val-box-views" class="text-[#e7cb88] tabular-nums">12 views + nadir</span>
+              </div>
+              <div class="grid grid-cols-4 gap-1">
+                <button type="button" data-box-views="8" data-active="false" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">8</button>
+                <button type="button" data-box-views="12" data-active="true" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">12</button>
+                <button type="button" data-box-views="16" data-active="false" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">16</button>
+                <button type="button" data-box-views="24" data-active="false" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">24</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-1.5">
+            <button id="btn-box-capture-bundle" type="button" disabled class="chrono-pusher chrono-pusher-gold w-full py-2 px-3 rounded-lg text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">
+              Capture Studio Bundle (ZIP)
+            </button>
+            <div class="grid grid-cols-3 gap-1.5">
+              <button id="btn-box-export-json" type="button" disabled class="chrono-pusher py-1.5 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Bundle JSON</button>
+              <button id="btn-box-export-geojson" type="button" disabled class="chrono-pusher py-1.5 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">GeoJSON</button>
+              <button id="btn-box-copy-coords" type="button" disabled class="chrono-pusher py-1.5 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Copy Coords</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CARD 05: SITE (Manifest JSON, Camera Bookmarks, 3D Surface Measurement) -->
     <section id="card-site" data-card="site" data-tucked="true" aria-hidden="true" class="tuck-panel tuck-card hidden pointer-events-auto w-full max-w-[46rem] max-h-[58vh] overflow-y-auto glass-panel chrono-card rounded-xl p-3.5 space-y-3">
       <div class="flex items-center justify-between border-b border-white/10 pb-2">
         <div class="flex items-center gap-2">
@@ -800,6 +958,7 @@
     <button type="button" data-rail-card="world" data-active="false" class="chrono-rail-btn px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0">World</button>
     <button type="button" data-rail-card="flight" data-active="false" class="chrono-rail-btn px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0">Flight</button>
     <button type="button" data-rail-card="capture" data-active="false" class="chrono-rail-btn px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0">Capture</button>
+    <button type="button" data-rail-card="box" data-active="false" class="chrono-rail-btn px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0">Box</button>
     <button type="button" data-rail-card="site" data-active="false" class="chrono-rail-btn px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0">Site</button>
     <button type="button" data-rail-card="weather" data-active="false" class="chrono-rail-btn flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer whitespace-nowrap shrink-0">
       <span>Weather</span>

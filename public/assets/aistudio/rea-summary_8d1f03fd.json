@@ -1,0 +1,55 @@
+{
+  "captured_at": "2026-11-21T02:08:51Z",
+  "commands": [
+    {
+      "command": "inspect-artifact",
+      "input": "workspace/nearmap/bundles",
+      "artifact_format": "directory",
+      "evidence_output": "workspace/nearmap/inspect-artifact.evidence.json",
+      "result": "target_unavailable",
+      "message": "open_binary accepts files and Apple bundle directories. This directory is a JavaScript tree. No evidence file was written.",
+      "summary_file": "workspace/nearmap/inspect-artifact.summary.json",
+      "native_target": false
+    },
+    {
+      "command": "analyze-javascript-application",
+      "input": "workspace/nearmap/bundles",
+      "artifact_format": "directory",
+      "detail": "summary",
+      "evidence_output": "workspace/nearmap/analyze-javascript-application.evidence.json",
+      "integrity_policy": "record-and-continue",
+      "source_paths": [
+        "62e9375fd72790fe-app-af97ece3144311838b80.js",
+        "18f1773367e16203-libs-f810ea1fa767dbb051ab.js"
+      ],
+      "exit": 0,
+      "view_evidence_id": "ev_3c82a3d24d182ad0d2350b568bd2e9f0a33176488965951dd7e45f98cc2b5ae0",
+      "parent_evidence_id": "ev_a92de675c6684455f2491af03c47f934ab54860f85539ad9605c30d7e38f9474",
+      "parent_operation": "analyze_javascript_application",
+      "root_artifact_sha256": "ce6a37ebaf5be5f49bb7436bb42fcef41efecaab1bc4cdad079dd39c51f77a7c",
+      "relevant_files": 193,
+      "unselected_files": 191,
+      "parsed_javascript_files": 2,
+      "parse_failures": 0,
+      "visited_ast_nodes": 782058,
+      "findings": 1252,
+      "text_bytes_read": 3005860,
+      "native_addon_bindings": 0,
+      "nested_asar_containers": 0,
+      "syntax_complete": 2,
+      "syntax_not_examined": 191,
+      "application_coverage": "partial",
+      "semantic_coverage": "partial",
+      "semantic_truncated": true,
+      "note": "Both selected bundles parsed. Semantic graph hit the default node and unknown ceilings, so feature claims in REPORT.md cite the committed source windows, not a complete REA call graph. Full evidence stays in gitignored workspace/nearmap/."
+    },
+    {
+      "command": "recover-javascript-sources",
+      "input": "workspace/nearmap/bundles/62e9375fd72790fe-app-af97ece3144311838b80.js",
+      "result": "capability_unavailable",
+      "reason": "Wakaru ^1.13.0 is Linux x64 only and was not available. The only declared source map, https://apps.nearmap.com/sp.js, returned 404.",
+      "summary_file": "workspace/nearmap/recover-javascript-sources.json"
+    }
+  ],
+  "ghidra": "no native target; Ghidra n/a"
+}

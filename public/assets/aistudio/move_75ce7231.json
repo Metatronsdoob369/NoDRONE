@@ -1,0 +1,6 @@
+{"open_side_brg": 225.0, "orbit_direction": "cw", "ground_m": 163.0, "target_agl": 7.0, "top_offset_m": 3.0,
+ "kf0_label": "KF0 Reveal start — over the lake SW, low, pushing toward the lawn façade",
+ "kf1_label": "KF1 Reveal end — lawn façade fills frame; begin orbit",
+ "orbit_labels": ["KF2 Orbit — west end (pavilion side)", "KF3 Orbit — NW, roof planes opening up", "KF4 Orbit end — over the roundabout, lake behind the building"],
+ "time_of_day_gmt": "2026-09-02 23:15 GMT (7:15 pm local, golden hour, sun WNW)",
+ "site_title": "Old North State Club clubhouse, Uwharrie Point NC"}
