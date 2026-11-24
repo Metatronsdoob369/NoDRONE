@@ -508,8 +508,16 @@
         </button>
         <button type="button" data-flight-mode="tour" data-active="false" class="flight-mode-btn chrono-pusher px-3 py-2 rounded-lg text-left cursor-pointer">
           <div class="text-xs font-semibold whitespace-nowrap">Tour</div>
-          <div class="text-[10px] font-mono opacity-75">Bookmarks</div>
+          <div class="text-[10px] font-mono opacity-75">Smooth Path</div>
         </button>
+      </div>
+
+      <div class="flex items-center justify-between gap-2">
+        <label for="toggle-tour-hop" class="flex items-center gap-2 text-[11px] font-mono text-slate-300 cursor-pointer">
+          <input id="toggle-tour-hop" type="checkbox" class="accent-[#d4af63]" />
+          Hop between bookmarks
+        </label>
+        <button id="btn-export-flight-path" type="button" class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap">Export Fly-Through</button>
       </div>
 
       <!-- Calibrated Kinematics Sliders & 35mm Lens Row -->
@@ -581,7 +589,7 @@
             <button id="btn-path-preview" type="button" disabled data-active="false" class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Preview Path</button>
           </div>
           <div class="text-[10px] font-mono text-slate-400/90 leading-snug">
-            Accepts: <span class="text-slate-300">camera-path.json</span> · <span class="text-slate-300">GES .json</span> · <span class="text-slate-300">camera_matrices.json</span> · <span class="text-slate-300">splatthat-bundle.json</span>
+            Accepts: <span class="text-slate-300">camera-path.json</span> · <span class="text-slate-300">trajectory.json</span> · <span class="text-slate-300">GES .json</span> · <span class="text-slate-300">camera_matrices.json</span> · <span class="text-slate-300">splatthat-bundle.json</span>
           </div>
           <button id="btn-render-to-folder" type="button" disabled class="glass-btn hidden w-full py-1.5 rounded-md bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-40 disabled:cursor-not-allowed border border-sky-400/40 text-xs font-semibold text-sky-200 cursor-pointer whitespace-nowrap">Render to Folder</button>
           <div id="render-zip-parts-list" class="hidden space-y-1.5"></div>
