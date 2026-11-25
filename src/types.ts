@@ -61,6 +61,9 @@ export interface SurveySplatAnchor {
   baseHeightMeters: number;
 }
 
+export type SplatOriginMode = 'auto-ground' | 'enu-origin';
+export type SplatUpAxis = 'y-up' | 'z-up';
+
 export interface SurveySplatRef {
   name?: string;
   ionAssetId?: number | null;
@@ -70,6 +73,8 @@ export interface SurveySplatRef {
   headingDeg?: number;
   scale?: number;
   offsetMeters?: number;
+  originMode?: SplatOriginMode;
+  upAxis?: SplatUpAxis;
   splatCount?: number | null;
   lastError?: string | null;
 }

@@ -7,8 +7,10 @@ import {
   normalizeSiteManifest,
   resolveSurveySelection,
 } from '../surveyCatalog';
+import { createGaussianSplatGeometry } from 'three/examples/jsm/utils/GaussianSplatUtils.js';
 import {
   cesiumCameraToLocalThree,
+  downsampleGaussianSplatGeometry,
   inferOverlaySplatFormat,
   isSupportedSplatFileName,
   localThreeEnuToWgs84,
@@ -335,5 +337,34 @@ describe('ENU anchor math (WGS84 <-> local Three.js ENU)', () => {
     // Check right-handedness det = dot(right x up, back) === +1
     const det = dot3(cross3(localCam.right, localCam.up), localCam.back);
     expect(det).toBeCloseTo(1, 6);
+  });
+});
+
+describe('Gaussian splat geometry attribute count and downsampling', () => {
+  it('reads 3 splats from createGaussianSplatGeometry position attribute and keeps 3 when downsampling under budget', () => {
+    const centers = new Float32Array([
+      0, 0, 0,
+      1, 2, 3,
+      -1, 0.5, 2,
+    ]);
+    const covariances = new Float32Array([
+      0.01, 0, 0, 0.01, 0, 0.01,
+      0.02, 0, 0, 0.02, 0, 0.02,
+      0.03, 0, 0, 0.03, 0, 0.03,
+    ]);
+    const colors = new Uint8Array([
+      255, 0, 0, 255,
+      0, 255, 0, 255,
+      0, 0, 255, 255,
+    ]);
+
+    const geometry = createGaussianSplatGeometry(centers, covariances, colors);
+    expect(geometry.getAttribute('position')?.count).toBe(3);
+
+    const result = downsampleGaussianSplatGeometry(geometry, 10);
+    expect(result.originalCount).toBe(3);
+    expect(result.finalCount).toBe(3);
+    expect(result.wasDownsampled).toBe(false);
+    expect(result.geometry.getAttribute('position')?.count).toBe(3);
   });
 });

@@ -74,6 +74,13 @@ import {
   sampleFlightSpline,
   verticalFovDegForLens,
 } from './flightSpline';
+import {
+  buildColmapSparseTextFiles,
+  buildNerfstudioTransformsJson,
+  getOrbitPresetSummary,
+  getOrbitRingSpecs,
+  type OrbitRingRole,
+} from './orbitRig';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
 const DEFAULT_ION_TOKEN = '';
@@ -2753,12 +2760,13 @@ let cameraPathRemove: (() => void) | null = null;
     const btnFrame = el<HTMLButtonElement>('btn-box-frame');
     const btnClear = el<HTMLButtonElement>('btn-box-clear');
     const btnBundle = el<HTMLButtonElement>('btn-box-capture-bundle');
+    const btnToRenderPath = el<HTMLButtonElement>('btn-box-to-render-path');
     const btnJson = el<HTMLButtonElement>('btn-box-export-json');
     const btnGeoJson = el<HTMLButtonElement>('btn-box-export-geojson');
     const btnCopy = el<HTMLButtonElement>('btn-box-copy-coords');
     const valViews = el<HTMLSpanElement>('val-box-views');
 
-    if (valViews) valViews.textContent = `${geoBoxCaptureViews} views + nadir`;
+    if (valViews) valViews.textContent = getOrbitPresetSummary(geoBoxCaptureViews);
     document.querySelectorAll<HTMLButtonElement>('.box-views-btn').forEach((btn) => {
       const v = Number(btn.dataset.boxViews || 12);
       btn.setAttribute('data-active', String(v === geoBoxCaptureViews));
@@ -2772,7 +2780,7 @@ let cameraPathRemove: (() => void) | null = null;
     const hasBox = geoBox !== null;
     const btnShapeMode = el<HTMLButtonElement>('btn-box-shape-mode');
     const btnStripCapture = el<HTMLButtonElement>('btn-box-strip-capture');
-    [btnShapeMode, btnVis, btnFrame, btnClear, btnJson, btnGeoJson, btnCopy].forEach((b) => {
+    [btnShapeMode, btnVis, btnFrame, btnClear, btnToRenderPath, btnJson, btnGeoJson, btnCopy].forEach((b) => {
       if (b) b.disabled = !hasBox;
     });
     const captureDisabled = !hasBox || isCapturingGeoBox || isRenderingPath || isRecording;
@@ -3361,7 +3369,8 @@ let cameraPathRemove: (() => void) | null = null;
 
   interface GeoBoxRigPose {
     index: number;
-    ring: 'low-oblique' | 'high-oblique' | 'nadir';
+    ring: OrbitRingRole;
+    ringId: string;
     fileName: string;
     lat: number;
     lon: number;
@@ -3406,14 +3415,13 @@ let cameraPathRemove: (() => void) | null = null;
     const K = computePinholeK(resolution[0], resolution[1], fovyDeg);
     const targetEnu: [number, number, number] = [0, 0, roundTo(m.heightMeters * 0.5, 4)];
 
-    const lowCount = Math.max(4, Math.ceil(totalOrbitalViews * 0.55));
-    const highCount = Math.max(4, totalOrbitalViews - lowCount);
-
+    const ringSpecs = getOrbitRingSpecs(totalOrbitalViews);
     const poses: GeoBoxRigPose[] = [];
     let idx = 1;
 
     const pushPose = (
-      ring: GeoBoxRigPose['ring'],
+      ring: OrbitRingRole,
+      ringId: string,
       azimuthDeg: number,
       elevationDeg: number,
       rangeMeters: number
@@ -3454,6 +3462,7 @@ let cameraPathRemove: (() => void) | null = null;
       poses.push({
         index: idx,
         ring,
+        ringId,
         fileName: `frames/view_${String(idx).padStart(3, '0')}.png`,
         lat: Number(Cesium.Math.toDegrees(camCarto.latitude).toFixed(7)),
         lon: Number(Cesium.Math.toDegrees(camCarto.longitude).toFixed(7)),
@@ -3480,17 +3489,50 @@ let cameraPathRemove: (() => void) | null = null;
       idx += 1;
     };
 
-    for (let i = 0; i < lowCount; i++) {
-      pushPose('low-oblique', (i * 360) / lowCount, 22, standoff);
+    for (const spec of ringSpecs) {
+      const range = standoff * spec.distanceScale;
+      for (let i = 0; i < spec.count; i++) {
+        const az = (i * 360) / spec.count + spec.phaseOffsetDeg;
+        pushPose(spec.role, spec.id, az, spec.elevationDeg, range);
+      }
     }
-    const halfStep = 180 / highCount;
-    for (let i = 0; i < highCount; i++) {
-      pushPose('high-oblique', (i * 360) / highCount + halfStep, 48, standoff * 1.05);
-    }
-    // Top-down nadir shot directly over box center
-    pushPose('nadir', 0, 88, standoff * 1.12);
 
     return poses;
+  }
+
+  function loadGeoBoxRigIntoRenderPath(): void {
+    if (!geoBox || !viewer) return;
+    const canvas = viewer.scene.canvas as HTMLCanvasElement;
+    const targetW = canvas.width || 1280;
+    const targetH = canvas.height || 720;
+    const poses = computeGeoBoxCaptureRig(geoBox, geoBoxCaptureViews, [targetW, targetH]);
+    const m = computeGeoBoxMetrics(geoBox);
+    const slug =
+      m.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'site-asset';
+    const samples: RenderPathSample[] = poses.map((p, i) => ({
+      t: Number((i / 30).toFixed(4)),
+      lat: p.lat,
+      lon: p.lon,
+      height: p.height,
+      heading: p.heading,
+      pitch: p.pitch,
+      roll: p.roll,
+      fovyDeg: p.fovyDeg,
+    }));
+
+    finalizeLoadedRenderPath(
+      {
+        fileName: `${slug}-${poses.length}f-orbit.json`,
+        site: m.name,
+        fps: 30,
+        resolution: [targetW, targetH],
+        samples,
+      },
+      'RIG',
+      `Loaded Geo-Box multi-ring orbit (${poses.length} views @ ${targetW}×${targetH}) into Render Path — use Render to Folder or Render Frames.`,
+      `Loaded ${poses.length}-view orbit into Render Path`
+    );
+    setActiveCard('capture');
   }
 
   function buildGeoBoxAnchorsJson(box: GeoDrawBoxState): FlyoverAnchor[] {
@@ -3961,6 +4003,19 @@ let cameraPathRemove: (() => void) | null = null;
         const bundleManifest = buildSplatStudioManifest(boxSnapshot, poses, [targetW, targetH]);
         const cameraPathJson = buildGeoBoxCameraPathJson(boxSnapshot, poses, [targetW, targetH]);
         const geoJson = buildGeoBoxGeoJson(boxSnapshot);
+        const transformsJson = buildNerfstudioTransformsJson(poses, {
+          siteName: m.name,
+          anchor: {
+            lat: m.centerLat,
+            lon: m.centerLon,
+            baseHeightMeters: m.baseEllipsoidalMeters,
+          },
+        });
+        const colmapSparse = buildColmapSparseTextFiles(poses, {
+          widthMeters: m.widthMeters,
+          depthMeters: m.depthMeters,
+          heightMeters: m.heightMeters,
+        });
 
         zipEntries.unshift(
           {
@@ -3974,6 +4029,22 @@ let cameraPathRemove: (() => void) | null = null;
           {
             name: 'trajectory.json',
             data: encoder.encode(JSON.stringify(trajectoryJson, null, 2)),
+          },
+          {
+            name: 'transforms.json',
+            data: encoder.encode(JSON.stringify(transformsJson, null, 2)),
+          },
+          {
+            name: 'sparse/0/cameras.txt',
+            data: encoder.encode(colmapSparse.camerasTxt),
+          },
+          {
+            name: 'sparse/0/images.txt',
+            data: encoder.encode(colmapSparse.imagesTxt),
+          },
+          {
+            name: 'sparse/0/points3D.txt',
+            data: encoder.encode(colmapSparse.points3DTxt),
           },
           {
             name: 'splatthat-bundle.json',
@@ -3993,7 +4064,7 @@ let cameraPathRemove: (() => void) | null = null;
         const provenanceJson = await buildGeoBoxProvenanceJson(boxSnapshot, zipEntries);
         const provenanceBytes = encoder.encode(JSON.stringify(provenanceJson, null, 2));
         const provenanceDigest = await sha256Hex(provenanceBytes);
-        zipEntries.splice(6, 0, {
+        zipEntries.splice(10, 0, {
           name: 'provenance.json',
           data: provenanceBytes,
         });
@@ -5561,6 +5632,8 @@ let cameraPathRemove: (() => void) | null = null;
           headingDeg: existing?.headingDeg ?? 0,
           scale: existing?.scale ?? 1,
           offsetMeters: existing?.offsetMeters ?? 0,
+          originMode: existing?.originMode ?? 'auto-ground',
+          upAxis: existing?.upAxis ?? 'y-up',
           splatCount: null,
           lastError: null,
         };
@@ -5576,6 +5649,8 @@ let cameraPathRemove: (() => void) | null = null;
       headingDeg: existing?.headingDeg ?? 0,
       scale: existing?.scale ?? 1,
       offsetMeters: existing?.offsetMeters ?? 0,
+      originMode: existing?.originMode ?? 'auto-ground',
+      upAxis: existing?.upAxis ?? 'y-up',
       splatCount: null,
       lastError: null,
     };
@@ -5667,6 +5742,8 @@ let cameraPathRemove: (() => void) | null = null;
       headingDeg: typeof splat.headingDeg === 'number' ? splat.headingDeg : 0,
       scale: typeof splat.scale === 'number' && splat.scale > 0 ? splat.scale : 1,
       offsetMeters: typeof splat.offsetMeters === 'number' ? splat.offsetMeters : 0,
+      originMode: splat.originMode === 'enu-origin' ? ('enu-origin' as const) : ('auto-ground' as const),
+      upAxis: splat.upAxis === 'z-up' ? ('z-up' as const) : ('y-up' as const),
     };
 
     if (!options?.forceReload && splatOverlay.hasCachedSplat(survey.surveyId, splat.url)) {
@@ -5749,6 +5826,8 @@ let cameraPathRemove: (() => void) | null = null;
       headingDeg: existing?.headingDeg ?? 0,
       scale: existing?.scale ?? 1,
       offsetMeters: existing?.offsetMeters ?? 0,
+      originMode: existing?.originMode ?? 'auto-ground',
+      upAxis: existing?.upAxis ?? 'y-up',
     });
     surveyCatalogTouched = true;
     renderSurveyCatalogUI();
@@ -5762,6 +5841,11 @@ let cameraPathRemove: (() => void) | null = null;
       headingDeg: active.assets.splat?.headingDeg ?? 0,
       scale: active.assets.splat?.scale ?? 1,
       offsetMeters: active.assets.splat?.offsetMeters ?? 0,
+      originMode:
+        active.assets.splat?.originMode === 'enu-origin'
+          ? ('enu-origin' as const)
+          : ('auto-ground' as const),
+      upAxis: active.assets.splat?.upAxis === 'z-up' ? ('z-up' as const) : ('y-up' as const),
     };
 
     try {
@@ -5959,6 +6043,18 @@ let cameraPathRemove: (() => void) | null = null;
         const cnt = active.assets.splat.splatCount;
         splatCountEl.textContent =
           typeof cnt === 'number' && cnt > 0 ? `${cnt.toLocaleString()} splats` : 'unloaded';
+      }
+      const btnOriginMode = el<HTMLButtonElement>('btn-splat-origin-mode');
+      if (btnOriginMode) {
+        const isEnu = active.assets.splat.originMode === 'enu-origin';
+        btnOriginMode.textContent = isEnu ? 'ENU Origin' : 'Auto-Ground';
+        btnOriginMode.setAttribute('data-active', String(isEnu));
+      }
+      const btnUpAxis = el<HTMLButtonElement>('btn-splat-up-axis');
+      if (btnUpAxis) {
+        const isZUp = active.assets.splat.upAxis === 'z-up';
+        btnUpAxis.textContent = isZUp ? 'Z-up' : 'Y-up';
+        btnUpAxis.setAttribute('data-active', String(isZUp));
       }
     }
 
@@ -7256,6 +7352,34 @@ let cameraPathRemove: (() => void) | null = null;
     el<HTMLInputElement>('slider-splat-heading')?.addEventListener('input', handleSplatNudgeChange);
     el<HTMLInputElement>('slider-splat-scale')?.addEventListener('input', handleSplatNudgeChange);
     el<HTMLInputElement>('slider-splat-offset')?.addEventListener('input', handleSplatNudgeChange);
+    el<HTMLButtonElement>('btn-splat-origin-mode')?.addEventListener('click', () => {
+      const active = getActiveSurvey();
+      if (!active.assets.splat) return;
+      const nextMode = active.assets.splat.originMode === 'enu-origin' ? 'auto-ground' : 'enu-origin';
+      active.assets.splat.originMode = nextMode;
+      active.provenance.updatedAt = new Date().toISOString();
+      splatOverlay?.updatePlacement(active.surveyId, { originMode: nextMode });
+      renderSurveyCatalogUI();
+      showToast(
+        nextMode === 'enu-origin'
+          ? 'Splat origin: Keep ENU (0,0,0) for georeferenced site splats'
+          : 'Splat origin: Auto-ground bottom center for object splats'
+      );
+    });
+    el<HTMLButtonElement>('btn-splat-up-axis')?.addEventListener('click', () => {
+      const active = getActiveSurvey();
+      if (!active.assets.splat) return;
+      const nextAxis = active.assets.splat.upAxis === 'z-up' ? 'y-up' : 'z-up';
+      active.assets.splat.upAxis = nextAxis;
+      active.provenance.updatedAt = new Date().toISOString();
+      splatOverlay?.updatePlacement(active.surveyId, { upAxis: nextAxis });
+      renderSurveyCatalogUI();
+      showToast(
+        nextAxis === 'z-up'
+          ? 'Splat up-axis: Z-up (Blender / COLMAP ENU -> rotated upright)'
+          : 'Splat up-axis: Y-up (glTF / render_views.py --yup)'
+      );
+    });
     el<HTMLButtonElement>('btn-splat-reanchor')?.addEventListener('click', () => {
       const active = getActiveSurvey();
       if (!active.assets.splat) return;
@@ -7453,6 +7577,9 @@ let cameraPathRemove: (() => void) | null = null;
 
     el<HTMLButtonElement>('btn-box-capture-bundle')?.addEventListener('click', () => {
       void captureGeoBoxStudioBundle();
+    });
+    el<HTMLButtonElement>('btn-box-to-render-path')?.addEventListener('click', () => {
+      loadGeoBoxRigIntoRenderPath();
     });
 
     el<HTMLButtonElement>('btn-box-export-json')?.addEventListener('click', () => {
@@ -7659,6 +7786,7 @@ let cameraPathRemove: (() => void) | null = null;
     'slider-box-base': 'box',
     'slider-box-height': 'box',
     'btn-box-capture-bundle': 'box',
+    'btn-box-to-render-path': 'box',
     'btn-box-export-json': 'box',
     'btn-box-export-geojson': 'box',
     'btn-box-copy-coords': 'box',
@@ -7671,6 +7799,8 @@ let cameraPathRemove: (() => void) | null = null;
     'slider-splat-heading': 'site',
     'slider-splat-scale': 'site',
     'slider-splat-offset': 'site',
+    'btn-splat-origin-mode': 'site',
+    'btn-splat-up-axis': 'site',
     'btn-splat-reanchor': 'site',
     'input-site-title': 'site',
     'input-source-crs': 'site',

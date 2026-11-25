@@ -26,7 +26,7 @@ import {
   wgs84ToEnuEllipsoidal,
   type Vec3,
 } from './geodesy';
-import type { LogLevel, SurveySplatAnchor } from './types';
+import type { LogLevel, SplatOriginMode, SplatUpAxis, SurveySplatAnchor } from './types';
 
 export type OverlaySplatFormat = 'spz' | 'splat' | 'ksplat' | 'ply';
 
@@ -58,6 +58,8 @@ export interface SplatPlacement {
   headingDeg: number;
   scale: number;
   offsetMeters: number;
+  originMode?: SplatOriginMode;
+  upAxis?: SplatUpAxis;
 }
 
 export interface LoadedSplatResult {
@@ -218,7 +220,7 @@ export function downsampleGaussianSplatGeometry(
   srcGeo: THREE.BufferGeometry,
   maxSplats: number
 ): { geometry: THREE.BufferGeometry; originalCount: number; finalCount: number; wasDownsampled: boolean } {
-  const centerAttr = srcGeo.getAttribute('center') as THREE.BufferAttribute | undefined;
+  const centerAttr = srcGeo.getAttribute('position') as THREE.BufferAttribute | undefined;
   const covAttr = srcGeo.getAttribute('covariance') as THREE.BufferAttribute | undefined;
   const colorAttr = srcGeo.getAttribute('color') as THREE.BufferAttribute | undefined;
 
@@ -480,6 +482,7 @@ interface CachedSurveySplat {
   sourceKey: string;
   format: OverlaySplatFormat;
   pivot: THREE.Group;
+  holder: THREE.Group;
   splat: GaussianSplat;
   splatCount: number;
   originalSplatCount: number;
@@ -605,6 +608,21 @@ export function createSplatOverlayManager(
     const totalVerticalOffset = (p.verticalOffsetMeters || 0) + (p.offsetMeters || 0);
     const scale = Number.isFinite(p.scale) && p.scale > 0 ? p.scale : 1;
     const headingRad = -degToRad(Number.isFinite(p.headingDeg) ? p.headingDeg : 0);
+    const upAxis: SplatUpAxis = p.upAxis === 'z-up' ? 'z-up' : 'y-up';
+    const originMode: SplatOriginMode = p.originMode === 'enu-origin' ? 'enu-origin' : 'auto-ground';
+
+    // Apply source up-axis conversion on the inner mesh before grounding/origin offset:
+    // - 'y-up' (glTF / render_views.py --yup): identity
+    // - 'z-up' (Blender / COLMAP / ENU Z-up): rotate -90 deg around X so +Z becomes +Y (Up) and +Y (North) becomes -Z
+    entry.splat.rotation.set(upAxis === 'z-up' ? -Math.PI * 0.5 : 0, 0, 0);
+    entry.splat.position.set(0, 0, 0);
+    entry.holder.position.set(0, 0, 0);
+    entry.holder.updateMatrixWorld(true);
+
+    if (originMode === 'auto-ground') {
+      const bounds = computeObjectBounds(entry.holder);
+      entry.holder.position.set(-bounds.center.x, -bounds.box.min.y, -bounds.center.z);
+    }
 
     entry.pivot.position.set(0, totalVerticalOffset, 0);
     entry.pivot.rotation.set(0, headingRad, 0);
@@ -698,7 +716,7 @@ export function createSplatOverlayManager(
     const backend = await ensureRenderer();
 
     const rawGeometry = await parseSplatGeometryFromBuffer(buffer, format);
-    const centerAttr = rawGeometry.getAttribute('center') as THREE.BufferAttribute | undefined;
+    const centerAttr = rawGeometry.getAttribute('position') as THREE.BufferAttribute | undefined;
     const rawCount = centerAttr?.count ?? 0;
     if (rawCount <= 0) {
       rawGeometry.dispose();
@@ -726,11 +744,9 @@ export function createSplatOverlayManager(
     splatMesh.computeBoundingBox();
     splatMesh.computeBoundingSphere();
 
-    // Ground the splat so its bottom-center rests at local (0, 0, 0) inside the survey pivot
     const splatHolder = new THREE.Group();
     splatHolder.add(splatMesh);
     const bounds = computeObjectBounds(splatHolder);
-    splatMesh.position.set(-bounds.center.x, -bounds.box.min.y, -bounds.center.z);
 
     const pivot = new THREE.Group();
     pivot.name = `survey-splat-${surveyId}`;
@@ -748,6 +764,7 @@ export function createSplatOverlayManager(
       sourceKey,
       format,
       pivot,
+      holder: splatHolder,
       splat: splatMesh,
       splatCount: finalCount,
       originalSplatCount: originalCount,
@@ -763,6 +780,8 @@ export function createSplatOverlayManager(
         headingDeg: placement.headingDeg || 0,
         scale: placement.scale > 0 ? placement.scale : 1,
         offsetMeters: placement.offsetMeters || 0,
+        originMode: placement.originMode === 'enu-origin' ? 'enu-origin' : 'auto-ground',
+        upAxis: placement.upAxis === 'z-up' ? 'z-up' : 'y-up',
       },
     };
 
@@ -808,6 +827,8 @@ export function createSplatOverlayManager(
         headingDeg: placement.headingDeg || 0,
         scale: placement.scale > 0 ? placement.scale : 1,
         offsetMeters: placement.offsetMeters || 0,
+        originMode: placement.originMode === 'enu-origin' ? 'enu-origin' : 'auto-ground',
+        upAxis: placement.upAxis === 'z-up' ? 'z-up' : 'y-up',
       };
       applyPivotTransform(existing);
       activeSurveyId = surveyId;
@@ -893,6 +914,12 @@ export function createSplatOverlayManager(
     }
     if (typeof partial.offsetMeters === 'number' && Number.isFinite(partial.offsetMeters)) {
       entry.placement.offsetMeters = partial.offsetMeters;
+    }
+    if (partial.originMode === 'auto-ground' || partial.originMode === 'enu-origin') {
+      entry.placement.originMode = partial.originMode;
+    }
+    if (partial.upAxis === 'y-up' || partial.upAxis === 'z-up') {
+      entry.placement.upAxis = partial.upAxis;
     }
     applyPivotTransform(entry);
   }

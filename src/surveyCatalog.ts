@@ -98,6 +98,9 @@ export function normalizeSplatRef(raw: unknown): SurveySplatRef | null {
   const offsetMeters =
     typeof r.offsetMeters === 'number' && Number.isFinite(r.offsetMeters) ? r.offsetMeters : 0;
 
+  const originMode = r.originMode === 'enu-origin' ? 'enu-origin' : 'auto-ground';
+  const upAxis = r.upAxis === 'z-up' ? 'z-up' : 'y-up';
+
   return {
     name: typeof r.name === 'string' && r.name.trim() ? r.name.trim() : undefined,
     ionAssetId,
@@ -114,6 +117,8 @@ export function normalizeSplatRef(raw: unknown): SurveySplatRef | null {
     headingDeg,
     scale,
     offsetMeters,
+    originMode,
+    upAxis,
     splatCount:
       typeof r.splatCount === 'number' && Number.isFinite(r.splatCount) && r.splatCount >= 0
         ? Math.floor(r.splatCount)
@@ -275,6 +280,8 @@ export function createDefaultSurveyRecord(options?: {
           headingDeg: 0,
           scale: 1,
           offsetMeters: 0,
+          originMode: 'auto-ground',
+          upAxis: 'y-up',
           splatCount: null,
           lastError: null,
         }

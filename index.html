@@ -696,22 +696,28 @@
         <!-- Right Column: Multi-Angle Rig & Splat Studio Export -->
         <div class="space-y-2.5 flex flex-col justify-between">
           <div class="space-y-1.5">
-            <div class="flex items-center justify-between text-[11px] font-mono">
-              <span class="text-slate-400">Multi-Angle Rig</span>
-              <span id="val-box-views" class="text-[#e7cb88] tabular-nums">12 views + nadir</span>
+            <div class="flex items-center justify-between gap-2 text-[11px] font-mono">
+              <span class="text-slate-400 shrink-0">Multi-Ring Rig</span>
+              <span id="val-box-views" class="text-[#e7cb88] tabular-nums truncate">13 views (12 + nadir)</span>
             </div>
-            <div class="grid grid-cols-4 gap-1">
-              <button type="button" data-box-views="8" data-active="false" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">8</button>
-              <button type="button" data-box-views="12" data-active="true" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">12</button>
-              <button type="button" data-box-views="16" data-active="false" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">16</button>
-              <button type="button" data-box-views="24" data-active="false" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">24</button>
+            <div class="grid grid-cols-5 gap-1">
+              <button type="button" data-box-views="12" data-active="true" title="Quick 2-ring preview + nadir (13 views)" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">12</button>
+              <button type="button" data-box-views="24" data-active="false" title="2-ring oblique + nadir (25 views)" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">24</button>
+              <button type="button" data-box-views="72" data-active="false" title="Compact 5-ring site dome + close detail ring (72 views)" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">72</button>
+              <button type="button" data-box-views="150" data-active="false" title="Medium 6-ring site dome + close detail ring (150 views)" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">150</button>
+              <button type="button" data-box-views="317" data-active="false" title="Full 7-ring site dome (20/35/50/65/80/90° + inner 40° detail ring = 317 views)" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">317</button>
             </div>
           </div>
 
           <div class="space-y-1.5">
-            <button id="btn-box-capture-bundle" type="button" disabled class="chrono-pusher chrono-pusher-gold w-full py-2 px-3 rounded-lg text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">
-              Capture Studio Bundle (ZIP)
-            </button>
+            <div class="grid grid-cols-2 gap-1.5">
+              <button id="btn-box-capture-bundle" type="button" disabled title="Capture PNG frames + transforms.json + COLMAP sparse/0 + camera_matrices.json into a ZIP" class="chrono-pusher chrono-pusher-gold py-2 px-2.5 rounded-lg text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">
+                Capture Bundle
+              </button>
+              <button id="btn-box-to-render-path" type="button" disabled title="Load this multi-ring orbit directly into Render Path to preview the 3D dome or render to Folder / chunked ZIP" class="chrono-pusher py-2 px-2.5 rounded-lg text-xs font-medium text-sky-200 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">
+                To Render Path
+              </button>
+            </div>
             <div class="grid grid-cols-3 gap-1.5">
               <button id="btn-box-export-json" type="button" disabled class="chrono-pusher py-1.5 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Bundle JSON</button>
               <button id="btn-box-export-geojson" type="button" disabled class="chrono-pusher py-1.5 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">GeoJSON</button>
@@ -807,12 +813,16 @@
 
         <!-- Per-Splat Overlay Placement Nudge Sliders (shown when overlay splat is attached) -->
         <div id="survey-splat-nudges" class="hidden rounded-md bg-black/45 border border-white/10 p-2 space-y-1.5">
-          <div class="flex items-center justify-between gap-2 text-[10px] font-mono">
+          <div class="flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-mono">
             <div class="flex items-center gap-2 min-w-0">
               <span class="uppercase tracking-[0.1em] text-[#e7cb88]">Splat Overlay</span>
               <span id="survey-splat-count" class="text-emerald-300 tabular-nums truncate"></span>
             </div>
-            <button id="btn-splat-reanchor" type="button" title="Anchor splat to current Geo-Box center (or viewport center)" class="chrono-pusher px-2 py-0.5 rounded text-[9px] font-mono text-slate-200 cursor-pointer whitespace-nowrap">Re-anchor</button>
+            <div class="flex items-center gap-1 shrink-0">
+              <button id="btn-splat-origin-mode" type="button" data-active="false" title="Toggle Auto-Ground Center (standalone object) vs. Keep ENU Origin (georeferenced site splat)" class="chrono-pusher px-2 py-0.5 rounded text-[9px] font-mono text-slate-200 cursor-pointer whitespace-nowrap">Auto-Ground</button>
+              <button id="btn-splat-up-axis" type="button" data-active="false" title="Toggle source up-axis: Y-up (glTF / render_views.py --yup) vs. Z-up (Blender / COLMAP ENU)" class="chrono-pusher px-2 py-0.5 rounded text-[9px] font-mono text-slate-200 cursor-pointer whitespace-nowrap">Y-up</button>
+              <button id="btn-splat-reanchor" type="button" title="Anchor splat to current Geo-Box center (or viewport center)" class="chrono-pusher px-2 py-0.5 rounded text-[9px] font-mono text-slate-200 cursor-pointer whitespace-nowrap">Re-anchor</button>
+            </div>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <div>
