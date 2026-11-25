@@ -17,10 +17,18 @@
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.147/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.147/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
 </head>
-<body class="bg-[#07090d] text-slate-100 font-sans antialiased overflow-hidden select-none h-screen w-screen relative" data-copilot-open="false">
+<body class="bg-[#07090d] text-slate-100 font-sans antialiased overflow-hidden select-none h-screen w-screen relative" data-copilot-open="false" data-copilot-dock="right">
 
   <!-- Full-Viewport Cesium 3D Globe Container -->
   <div id="cesium-container" class="absolute inset-0 w-full h-full bg-[#07090d]"></div>
+
+  <!-- Drag-and-Drop Gaussian Splat Overlay Hint -->
+  <div id="splat-drop-overlay" class="hidden fixed inset-0 z-50 pointer-events-none flex items-center justify-center bg-black/55 backdrop-blur-xs">
+    <div class="glass-panel border border-[#d4af63]/75 rounded-xl px-6 py-4 text-center space-y-1 shadow-2xl">
+      <div class="text-xs font-mono uppercase tracking-[0.14em] text-[#e7cb88]">Attach Splat to Active Survey</div>
+      <div class="text-xs text-slate-200">Drop <span class="font-mono text-[#f6e6be]">.spz · .ply · .splat · .ksplat</span> onto the globe</div>
+    </div>
+  </div>
 
   <!-- WebGL Context Fallback Banner -->
   <div id="webgl-fallback" class="hidden absolute inset-0 z-30 flex items-center justify-center bg-black/90 p-6">
@@ -604,15 +612,16 @@
     </section>
 
     <!-- CARD 04: GEO-BOX (Interactive 3D Bounding Box & Splat Studio Capture Bundle) -->
-    <section id="card-box" data-card="box" data-tucked="true" aria-hidden="true" class="tuck-panel tuck-card hidden pointer-events-auto w-full max-w-[47rem] max-h-[60vh] overflow-y-auto glass-panel chrono-card rounded-xl p-3.5 space-y-3">
+    <section id="card-box" data-card="box" data-tucked="true" aria-hidden="true" class="tuck-panel tuck-card hidden pointer-events-auto w-full max-w-[40rem] max-h-[54vh] overflow-y-auto glass-panel chrono-card rounded-xl p-3.5 space-y-2.5">
       <div class="flex items-center justify-between gap-2 border-b border-white/10 pb-2">
         <div class="flex items-center gap-2 min-w-0">
           <span class="text-[10px] font-mono text-[#d4af63]">04</span>
-          <h2 class="text-[11px] font-mono uppercase tracking-[0.16em] text-slate-100 whitespace-nowrap">Geo-Coordinate Draw Box</h2>
+          <h2 class="text-[11px] font-mono uppercase tracking-[0.14em] text-slate-100 whitespace-nowrap">Geo-Box</h2>
           <span class="text-white/20" aria-hidden="true">·</span>
           <span id="box-status" class="text-[11px] font-mono text-slate-400 truncate">No box</span>
         </div>
         <div class="flex items-center gap-1.5 shrink-0">
+          <button id="btn-box-shape-mode" type="button" disabled title="Hide panel and shape corners/height directly on the 3D globe" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium text-[#e7cb88] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Shape</button>
           <button id="btn-box-visible" type="button" disabled data-active="true" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Visible</button>
           <button id="btn-box-frame" type="button" disabled class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Frame</button>
           <button id="btn-box-clear" type="button" disabled class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium text-slate-400 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Clear</button>
@@ -628,74 +637,74 @@
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <!-- Left Column: Live Geometry Readout & Editable WGS84 Bounds -->
+        <!-- Left Column: Live Geometry Readout & Sliders -->
         <div class="space-y-2.5">
-          <div class="grid grid-cols-2 gap-1.5">
-            <div class="chrono-dial rounded-lg p-2">
-              <div class="text-[9px] font-mono uppercase tracking-[0.12em] text-slate-400">Footprint</div>
-              <div id="box-dim-readout" class="text-xs font-mono font-semibold text-white tabular-nums mt-0.5">-- × -- m</div>
-              <div id="box-area-readout" class="text-[10px] font-mono text-slate-400 tabular-nums">-- m²</div>
+          <div class="flex items-center justify-between gap-2 px-1 py-1 border-b border-white/10 text-[11px] font-mono">
+            <div class="min-w-0">
+              <div id="box-dim-readout" class="font-semibold text-white tabular-nums">-- × -- m</div>
+              <div id="box-area-readout" class="text-[10px] text-slate-400 tabular-nums">-- m²</div>
             </div>
-            <div class="chrono-dial rounded-lg p-2">
-              <div class="text-[9px] font-mono uppercase tracking-[0.12em] text-slate-400">Envelope</div>
-              <div id="box-alt-readout" class="text-xs font-mono font-semibold text-[#e7cb88] tabular-nums mt-0.5">-- → -- m</div>
-              <div id="box-center-readout" class="text-[10px] font-mono text-slate-400 tabular-nums truncate">--°, --°</div>
+            <div class="text-right min-w-0">
+              <div id="box-alt-readout" class="font-semibold text-[#e7cb88] tabular-nums">-- → -- m</div>
+              <div id="box-center-readout" class="text-[10px] text-slate-400 tabular-nums truncate">--°, --°</div>
             </div>
           </div>
 
-          <div class="glass-well rounded-lg p-2.5 space-y-1.5">
-            <div class="flex items-center justify-between text-[10px] font-mono uppercase tracking-[0.12em]">
-              <span class="text-slate-400">Drag Corners (XY) · Drag ↕ TOP / ↕ BASE (Z)</span>
-            </div>
-            <div class="grid grid-cols-2 gap-1.5">
-              <div>
-                <label for="input-box-south" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">South Lat</label>
-                <input id="input-box-south" type="number" step="0.00005" placeholder="33.501500" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
-              </div>
-              <div>
-                <label for="input-box-north" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">North Lat</label>
-                <input id="input-box-north" type="number" step="0.00005" placeholder="33.502700" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
-              </div>
-              <div>
-                <label for="input-box-west" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">West Lon</label>
-                <input id="input-box-west" type="number" step="0.00005" placeholder="-82.023300" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
-              </div>
-              <div>
-                <label for="input-box-east" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">East Lon</label>
-                <input id="input-box-east" type="number" step="0.00005" placeholder="-82.021900" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Right Column: Vertical Envelope Sliders & Splat Studio Handoff Export -->
-        <div class="space-y-2.5 flex flex-col justify-between">
-          <div class="glass-well rounded-lg p-2.5 space-y-2">
+          <div class="space-y-2 px-0.5">
             <div>
               <div class="flex justify-between text-[11px] font-mono mb-0.5">
-                <span class="text-slate-400 uppercase tracking-[0.08em]">Base Offset</span>
+                <span class="text-slate-400">Base Offset</span>
                 <span id="val-box-base" class="text-[#e7cb88] tabular-nums">0 m</span>
               </div>
               <input id="slider-box-base" type="range" min="-50" max="250" step="1" value="0" class="chrono-slider" />
             </div>
             <div>
               <div class="flex justify-between text-[11px] font-mono mb-0.5">
-                <span class="text-slate-400 uppercase tracking-[0.08em]">Ceiling Height</span>
+                <span class="text-slate-400">Ceiling Height</span>
                 <span id="val-box-height" class="text-[#e7cb88] tabular-nums">25 m</span>
               </div>
               <input id="slider-box-height" type="range" min="4" max="500" step="1" value="25" class="chrono-slider" />
             </div>
-            <div class="pt-0.5">
-              <div class="flex items-center justify-between text-[10px] font-mono mb-1">
-                <span class="text-slate-400 uppercase tracking-[0.08em]">Multi-Angle Rig</span>
-                <span id="val-box-views" class="text-[#e7cb88] tabular-nums">12 views + nadir</span>
+          </div>
+
+          <!-- Collapsible Exact WGS84 Coordinates (keeps panel slim while preserving full numeric control) -->
+          <details id="box-coords-details" class="border-t border-white/10 pt-2">
+            <summary class="text-[10px] font-mono text-slate-400 hover:text-[#e7cb88] cursor-pointer select-none">
+              Exact WGS84 Bounds
+            </summary>
+            <div class="grid grid-cols-2 gap-1.5 mt-2">
+              <div>
+                <label for="input-box-south" class="text-[9px] font-mono text-slate-400 block mb-0.5">South Lat</label>
+                <input id="input-box-south" type="number" step="0.00005" placeholder="33.501500" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
               </div>
-              <div class="grid grid-cols-4 gap-1">
-                <button type="button" data-box-views="8" data-active="false" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">8</button>
-                <button type="button" data-box-views="12" data-active="true" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">12</button>
-                <button type="button" data-box-views="16" data-active="false" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">16</button>
-                <button type="button" data-box-views="24" data-active="false" class="box-views-btn chrono-pusher py-1 rounded-md text-[11px] font-mono cursor-pointer">24</button>
+              <div>
+                <label for="input-box-north" class="text-[9px] font-mono text-slate-400 block mb-0.5">North Lat</label>
+                <input id="input-box-north" type="number" step="0.00005" placeholder="33.502700" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
               </div>
+              <div>
+                <label for="input-box-west" class="text-[9px] font-mono text-slate-400 block mb-0.5">West Lon</label>
+                <input id="input-box-west" type="number" step="0.00005" placeholder="-82.023300" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
+              </div>
+              <div>
+                <label for="input-box-east" class="text-[9px] font-mono text-slate-400 block mb-0.5">East Lon</label>
+                <input id="input-box-east" type="number" step="0.00005" placeholder="-82.021900" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 tabular-nums focus:outline-none" />
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- Right Column: Multi-Angle Rig & Splat Studio Export -->
+        <div class="space-y-2.5 flex flex-col justify-between">
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between text-[11px] font-mono">
+              <span class="text-slate-400">Multi-Angle Rig</span>
+              <span id="val-box-views" class="text-[#e7cb88] tabular-nums">12 views + nadir</span>
+            </div>
+            <div class="grid grid-cols-4 gap-1">
+              <button type="button" data-box-views="8" data-active="false" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">8</button>
+              <button type="button" data-box-views="12" data-active="true" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">12</button>
+              <button type="button" data-box-views="16" data-active="false" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">16</button>
+              <button type="button" data-box-views="24" data-active="false" class="box-views-btn chrono-pusher py-1.5 rounded-md text-[11px] font-mono cursor-pointer">24</button>
             </div>
           </div>
 
@@ -756,13 +765,12 @@
               <select id="select-new-survey-status" class="w-full glass-input rounded-md px-2 py-1 text-xs font-mono text-slate-100 focus:outline-none">
                 <option value="planned">planned</option>
                 <option value="captured">captured</option>
-                <option value="processed">processed</option>
               </select>
             </div>
           </div>
           <div class="flex items-end gap-1.5">
             <div class="flex-1 min-w-0">
-              <label for="input-new-survey-splat" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Splat Reference (Optional Ion Asset ID or .ply/.spz URL)</label>
+              <label for="input-new-survey-splat" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Splat Reference (Optional Ion Asset ID or .spz/.ply/.splat/.ksplat URL)</label>
               <input id="input-new-survey-splat" type="text" placeholder="e.g. 4547222 or https://.../scene.spz" class="w-full glass-input rounded-md px-2 py-1 text-xs font-mono text-slate-100 placeholder-slate-500 focus:outline-none" />
             </div>
             <button id="btn-create-survey" type="button" class="chrono-pusher chrono-pusher-gold px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer whitespace-nowrap">Create</button>
@@ -790,8 +798,49 @@
           </div>
           <div class="sm:col-span-3">
             <label for="input-active-survey-splat" class="text-[9px] font-mono uppercase tracking-[0.1em] text-slate-400 block mb-0.5">Splat ID / URL</label>
-            <input id="input-active-survey-splat" type="text" placeholder="None linked" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 placeholder-slate-500 focus:outline-none" />
+            <input id="input-active-survey-splat" type="text" placeholder="Ion ID or .spz/.ply URL" class="w-full glass-input rounded-md px-2 py-1 text-[11px] font-mono text-slate-100 placeholder-slate-500 focus:outline-none" />
           </div>
+        </div>
+
+        <!-- Inline Splat Load Error Banner -->
+        <div id="survey-splat-error" class="hidden rounded-md bg-red-950/60 border border-red-500/45 px-2.5 py-1.5 text-[10px] font-mono text-red-200 break-words"></div>
+
+        <!-- Per-Splat Overlay Placement Nudge Sliders (shown when overlay splat is attached) -->
+        <div id="survey-splat-nudges" class="hidden rounded-md bg-black/45 border border-white/10 p-2 space-y-1.5">
+          <div class="flex items-center justify-between gap-2 text-[10px] font-mono">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="uppercase tracking-[0.1em] text-[#e7cb88]">Splat Overlay</span>
+              <span id="survey-splat-count" class="text-emerald-300 tabular-nums truncate"></span>
+            </div>
+            <button id="btn-splat-reanchor" type="button" title="Anchor splat to current Geo-Box center (or viewport center)" class="chrono-pusher px-2 py-0.5 rounded text-[9px] font-mono text-slate-200 cursor-pointer whitespace-nowrap">Re-anchor</button>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div>
+              <div class="flex justify-between text-[10px] font-mono mb-0.5">
+                <span class="text-slate-400">Heading</span>
+                <span id="val-splat-heading" class="text-[#e7cb88] tabular-nums">0°</span>
+              </div>
+              <input id="slider-splat-heading" type="range" min="-180" max="180" step="1" value="0" class="chrono-slider" />
+            </div>
+            <div>
+              <div class="flex justify-between text-[10px] font-mono mb-0.5">
+                <span class="text-slate-400">Scale</span>
+                <span id="val-splat-scale" class="text-[#e7cb88] tabular-nums">1.00×</span>
+              </div>
+              <input id="slider-splat-scale" type="range" min="0.05" max="10" step="0.05" value="1" class="chrono-slider" />
+            </div>
+            <div>
+              <div class="flex justify-between text-[10px] font-mono mb-0.5">
+                <span class="text-slate-400">Z Offset</span>
+                <span id="val-splat-offset" class="text-[#e7cb88] tabular-nums">0.0 m</span>
+              </div>
+              <input id="slider-splat-offset" type="range" min="-50" max="50" step="0.2" value="0" class="chrono-slider" />
+            </div>
+          </div>
+        </div>
+
+        <div class="text-[9px] font-mono text-slate-400/80">
+          Tip: Paste an Ion Asset ID, a <span class="text-slate-300">.spz / .ply / .splat / .ksplat</span> URL, or drag-and-drop a splat file onto the globe.
         </div>
 
         <!-- Before/After Compare Hook Banner (shown when a comparison epoch is armed) -->
@@ -978,22 +1027,35 @@
   </div>
 
   <!-- ========================================================================
-       PERSISTENT STATE-AWARE CO-PILOT RIGHT DRAWER (Coexists with bottom cards)
+       AVIONICS FLIGHT-DECK CO-PILOT COMMS BAY (Right Edge Dock / Top Overhead)
        ======================================================================== -->
-  <aside id="copilot-drawer" data-tucked="true" aria-hidden="true" class="tuck-panel tuck-right flex fixed top-4 right-4 z-30 w-[calc(100vw-2rem)] sm:w-[21.5rem] h-[calc(100vh-5.75rem)] glass-panel chrono-card rounded-xl flex-col overflow-hidden">
-    <!-- Drawer Header -->
-    <div class="flex items-center justify-between gap-2 px-3.5 py-2.5 border-b border-white/10 shrink-0">
-      <div class="flex items-center gap-2 min-w-0">
-        <div class="flex items-center justify-center w-6 h-6 rounded-md bg-[#d4af63]/16 text-[#e7cb88] border border-[#d4af63]/40 shrink-0">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 9.75a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375m-13.5 3.01c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.184-4.183a1.14 1.14 0 01.778-.332 48.294 48.294 0 005.83-.498c1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+  <aside id="copilot-drawer" data-dock="right" data-tucked="true" aria-hidden="true" class="avionics-bay tuck-panel flex fixed z-30 flex-col overflow-hidden">
+    <!-- Machined Avionics Bezel Header -->
+    <div class="avionics-bezel-header flex items-center justify-between gap-2 pl-4 pr-3 py-2.5 shrink-0">
+      <div class="flex items-center gap-2.5 min-w-0">
+        <div class="flex items-center justify-center w-7 h-7 rounded-md bg-[#d4af63]/14 text-[#e7cb88] border border-[#d4af63]/45 shadow-[inset_0_1px_0_rgba(255,244,214,0.22)] shrink-0">
+          <!-- Aviation Attitude / Flight Director Comms Emblem -->
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.75" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.5" stroke-opacity="0.55" />
+            <path stroke-linecap="round" d="M3.5 12H8m8 0h4.5M12 3.5V6" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8.5 13.5L12 10.5l3.5 3" />
           </svg>
         </div>
-        <h2 class="text-[11px] font-mono uppercase tracking-[0.14em] text-white truncate">Co-Pilot</h2>
+        <div class="min-w-0">
+          <h2 class="text-xs font-semibold tracking-[0.06em] text-white leading-tight truncate">Co-Pilot</h2>
+          <div class="text-[10px] font-mono text-slate-400 leading-tight truncate">Flight Deck Comms</div>
+        </div>
       </div>
       <div class="flex items-center gap-1 shrink-0">
-        <button id="btn-copilot-clear" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium cursor-pointer" title="Clear conversation">Clear</button>
-        <button id="btn-close-copilot" type="button" class="chrono-pusher p-1.5 rounded-md cursor-pointer" title="Tuck Co-Pilot">
+        <button id="btn-copilot-dock" type="button" class="chrono-pusher flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-mono font-medium cursor-pointer whitespace-nowrap" title="Move Co-Pilot to Top Overhead">
+          <svg id="icon-copilot-dock" class="w-3 h-3 text-[#e7cb88]" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M3 10h18" />
+          </svg>
+          <span id="label-copilot-dock">Top</span>
+        </button>
+        <button id="btn-copilot-clear" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[10px] font-medium cursor-pointer whitespace-nowrap" title="Clear conversation">Clear</button>
+        <button id="btn-close-copilot" type="button" class="chrono-pusher p-1.5 rounded-md cursor-pointer" title="Hide Co-Pilot" aria-label="Hide Co-Pilot">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 4.5l7.5 7.5-7.5 7.5m6-15l7.5 7.5-7.5 7.5" />
           </svg>
@@ -1001,48 +1063,75 @@
       </div>
     </div>
 
-    <!-- Gemini Live Voice Session Bar (hidden until active) -->
-    <div id="copilot-voice-bar" class="hidden items-center justify-between gap-2 px-3.5 py-2 bg-emerald-500/15 border-b border-emerald-400/25 shrink-0">
+    <!-- Gemini Live Voice Active Channel Bar (shown only while mic/voice stream is genuinely active) -->
+    <div id="copilot-voice-bar" class="hidden items-center justify-between gap-2 pl-4 pr-3 py-2 bg-emerald-950/55 border-b border-emerald-400/30 shrink-0">
       <div class="flex items-center gap-2 min-w-0">
         <span id="copilot-voice-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
         <span id="copilot-voice-status" class="text-[11px] font-mono text-emerald-200 truncate">Voice Live — Listening</span>
       </div>
-      <button id="btn-copilot-stop-voice" type="button" class="glass-btn px-2 py-1 rounded-md bg-red-600/85 hover:bg-red-500 text-[10px] font-semibold text-white cursor-pointer shrink-0">End</button>
+      <button id="btn-copilot-stop-voice" type="button" class="glass-btn px-2.5 py-1 rounded-md bg-red-600/85 hover:bg-red-500 text-[10px] font-semibold text-white cursor-pointer shrink-0">End</button>
     </div>
 
-    <!-- Scrollable Chat Messages & Tool Call Chips -->
-    <div id="copilot-messages" class="flex-1 overflow-y-auto p-3.5 space-y-3 select-text">
-      <div id="copilot-empty" class="space-y-2.5 py-1">
-        <p class="text-[11px] text-slate-300/80 leading-relaxed">
-          State-aware flight, 3DGS, live web research, and real-time UI guidance by text or voice.
+    <!-- Recessed Flight Deck Dispatch Log -->
+    <div id="copilot-messages" class="flex-1 overflow-y-auto pl-4 pr-3.5 py-3 space-y-3 select-text">
+      <div id="copilot-empty" class="space-y-3 py-1">
+        <p class="text-[11.5px] text-slate-300/85 leading-relaxed">
+          Voice and text flight control, 3DGS survey loading, live web research, and panel guidance.
         </p>
         <div class="space-y-1.5">
-          <button type="button" data-copilot-prompt="Research FAA Part 107 maximum altitude and airspace rules" class="copilot-quick-btn chrono-pusher w-full text-left px-3 py-2 rounded-lg text-xs cursor-pointer">
-            Research FAA Part 107 altitude rules
+          <div class="text-[10px] font-mono tracking-[0.08em] text-[#e7cb88]/85 pb-0.5 border-b border-white/10">Quick Commands</div>
+          <button type="button" data-copilot-prompt="Research FAA Part 107 maximum altitude and airspace rules" class="copilot-quick-btn avionics-checklist-row w-full flex items-center justify-between gap-2 text-left px-2.5 py-2 rounded-lg text-xs text-slate-200 cursor-pointer">
+            <span class="flex items-center gap-2 min-w-0">
+              <span class="text-[10px] font-mono text-[#d4af63] tabular-nums shrink-0">01</span>
+              <span class="truncate">Research FAA Part 107 altitude rules</span>
+            </span>
+            <span class="text-[11px] font-mono text-slate-500 shrink-0" aria-hidden="true">→</span>
           </button>
-          <button type="button" data-copilot-prompt="Open Capture and show me how to render a path" class="copilot-quick-btn chrono-pusher w-full text-left px-3 py-2 rounded-lg text-xs cursor-pointer">
-            Show me how to render a path
+          <button type="button" data-copilot-prompt="Open Capture and show me how to render a path" class="copilot-quick-btn avionics-checklist-row w-full flex items-center justify-between gap-2 text-left px-2.5 py-2 rounded-lg text-xs text-slate-200 cursor-pointer">
+            <span class="flex items-center gap-2 min-w-0">
+              <span class="text-[10px] font-mono text-[#d4af63] tabular-nums shrink-0">02</span>
+              <span class="truncate">Show me how to render a path</span>
+            </span>
+            <span class="text-[11px] font-mono text-slate-500 shrink-0" aria-hidden="true">→</span>
           </button>
-          <button type="button" data-copilot-prompt="Start a 360 orbit and record one lap" class="copilot-quick-btn chrono-pusher w-full text-left px-3 py-2 rounded-lg text-xs cursor-pointer">
-            Start a 360° orbit &amp; record
+          <button type="button" data-copilot-prompt="Start a 360 orbit and record one lap" class="copilot-quick-btn avionics-checklist-row w-full flex items-center justify-between gap-2 text-left px-2.5 py-2 rounded-lg text-xs text-slate-200 cursor-pointer">
+            <span class="flex items-center gap-2 min-w-0">
+              <span class="text-[10px] font-mono text-[#d4af63] tabular-nums shrink-0">03</span>
+              <span class="truncate">Start a 360° orbit &amp; record</span>
+            </span>
+            <span class="text-[11px] font-mono text-slate-500 shrink-0" aria-hidden="true">→</span>
           </button>
         </div>
       </div>
     </div>
 
-    <!-- Chat Input + Gemini Live Mic Bar -->
-    <form id="copilot-form" class="p-2.5 border-t border-white/10 bg-black/25 flex items-center gap-1.5 shrink-0">
-      <button id="btn-copilot-mic" type="button" class="chrono-pusher flex items-center justify-center w-9 h-9 rounded-lg shrink-0 cursor-pointer" title="Toggle Live Voice">
+    <!-- Machined Push-to-Talk Mic & Command Input Footer -->
+    <form id="copilot-form" class="pl-4 pr-3 py-2.5 border-t border-[#d4af63]/20 bg-[#06080d]/85 flex items-center gap-1.5 shrink-0">
+      <button id="btn-copilot-mic" type="button" class="chrono-pusher flex items-center justify-center w-9 h-9 rounded-lg shrink-0 cursor-pointer" title="Toggle Live Voice" aria-label="Toggle Live Voice">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
         </svg>
       </button>
       <input id="copilot-input" type="text" autocomplete="off" placeholder="Command or ask..." class="flex-1 min-w-0 glass-input rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none" />
-      <button id="btn-copilot-send" type="submit" class="chrono-pusher chrono-pusher-gold flex items-center justify-center px-3 h-9 rounded-lg disabled:opacity-50 text-xs font-semibold shrink-0 cursor-pointer">
+      <button id="btn-copilot-send" type="submit" class="chrono-pusher chrono-pusher-gold flex items-center justify-center px-3.5 h-9 rounded-lg disabled:opacity-50 text-xs font-semibold shrink-0 cursor-pointer whitespace-nowrap">
         Send
       </button>
     </form>
   </aside>
+
+  <!-- Slim Unobstructed Geo-Box Shaping Bar (replaces full card while shaping on the 3D globe) -->
+  <div id="box-shape-bar" class="hidden fixed bottom-[4.65rem] left-1/2 -translate-x-1/2 z-20 max-w-[calc(100vw-1.5rem)] overflow-x-auto flex items-center gap-2 glass-bar border-[#d4af63]/40 rounded-xl px-3 py-1.5">
+    <span class="text-[10px] font-mono tracking-[0.1em] text-[#d4af63] whitespace-nowrap shrink-0">BOX</span>
+    <span id="box-shape-dims" class="text-[11px] font-mono font-semibold text-white tabular-nums whitespace-nowrap shrink-0">-- × -- × -- m</span>
+    <span class="text-white/20 hidden md:inline" aria-hidden="true">|</span>
+    <span class="text-[10px] font-mono text-slate-400 whitespace-nowrap hidden md:inline">Drag corners · ↕ TOP / BASE</span>
+    <div class="h-4 w-px bg-white/12 mx-0.5 shrink-0" aria-hidden="true"></div>
+    <button id="btn-box-strip-frame" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap shrink-0">Frame</button>
+    <button id="btn-box-strip-redraw" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap shrink-0">Redraw</button>
+    <button id="btn-box-strip-panel" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium cursor-pointer whitespace-nowrap shrink-0">Controls</button>
+    <button id="btn-box-strip-capture" type="button" class="chrono-pusher chrono-pusher-gold px-2.5 py-1 rounded-md text-[11px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap shrink-0">Capture ZIP</button>
+    <button id="btn-box-strip-clear" type="button" class="chrono-pusher px-2 py-1 rounded-md text-[11px] font-medium text-slate-400 cursor-pointer whitespace-nowrap shrink-0" title="Clear Geo-Box" aria-label="Clear Geo-Box">×</button>
+  </div>
 
   <!-- ========================================================================
        CENTERED SLIM BOTTOM CHRONOGRAPH COMMAND RAIL

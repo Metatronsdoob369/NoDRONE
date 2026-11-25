@@ -55,6 +55,25 @@ export interface SurveyTilesetRef {
   clippingGeoJsonAssetId: number | null;
 }
 
+export interface SurveySplatAnchor {
+  lat: number;
+  lon: number;
+  baseHeightMeters: number;
+}
+
+export interface SurveySplatRef {
+  name?: string;
+  ionAssetId?: number | null;
+  url?: string | null;
+  format?: string;
+  anchor?: SurveySplatAnchor | null;
+  headingDeg?: number;
+  scale?: number;
+  offsetMeters?: number;
+  splatCount?: number | null;
+  lastError?: string | null;
+}
+
 export interface SurveyAssetBundle {
   imagery: {
     provider: string;
@@ -63,12 +82,7 @@ export interface SurveyAssetBundle {
     url?: string | null;
   } | null;
   mesh: SurveyTilesetRef | null;
-  splat: {
-    name?: string;
-    ionAssetId?: number | null;
-    url?: string | null;
-    format?: string;
-  } | null;
+  splat: SurveySplatRef | null;
   tilesets: SurveyTilesetRef[];
   clippingGeoJsonAssetId: number | null;
   bundleProvenanceSha256?: string | null;

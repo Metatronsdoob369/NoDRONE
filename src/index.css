@@ -333,20 +333,214 @@
   transform: translate3d(0, 18px, 0) scale(0.97);
 }
 
-/* Desktop card stage graceful shift when Co-Pilot right drawer is open */
+/* ==========================================================================
+   Co-Pilot Avionics Comms Bay (Right Vertical Edge Dock & Top Overhead Mode)
+   Zero-obstruction safe-zone reflow so Capture/Box/Site cards never overlap
+   ========================================================================== */
+
+:root {
+  --copilot-bay-w: 18rem;
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --copilot-bay-w: 20.5rem;
+  }
+}
+
+@media (min-width: 1440px) {
+  :root {
+    --copilot-bay-w: 22rem;
+  }
+}
+
+.avionics-bay {
+  background: linear-gradient(
+    180deg,
+    rgba(13, 17, 25, 0.88) 0%,
+    rgba(7, 10, 16, 0.94) 100%
+  );
+  backdrop-filter: blur(28px) saturate(165%);
+  -webkit-backdrop-filter: blur(28px) saturate(165%);
+  box-shadow:
+    -18px 0 48px -14px rgba(0, 0, 0, 0.82),
+    inset 1px 0 0 rgba(255, 255, 255, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+/* Right Vertical Edge Avionics Stack (Default) */
+#copilot-drawer[data-dock="right"] {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  width: min(100vw, 22rem);
+  height: 100vh;
+  max-height: 100vh;
+  border-radius: 0;
+  border-left: 1px solid rgba(212, 175, 99, 0.34);
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+@media (min-width: 640px) {
+  #copilot-drawer[data-dock="right"] {
+    width: var(--copilot-bay-w);
+    max-width: none;
+  }
+}
+
+#copilot-drawer[data-dock="right"][data-tucked="true"] {
+  transform: translate3d(100%, 0, 0);
+}
+
+/* Subtle Vernier instrument calibration ticks along inner bezel of right vertical bay */
+#copilot-drawer[data-dock="right"]::after {
+  content: "";
+  position: absolute;
+  top: 3.5rem;
+  bottom: 4.25rem;
+  left: 0;
+  width: 5px;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(212, 175, 99, 0.32) 0px,
+    rgba(212, 175, 99, 0.32) 1px,
+    transparent 1px,
+    transparent 11px
+  );
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* Overhead Glareshield Top Dock (Optional 1-click toggle) */
+#copilot-drawer[data-dock="top"] {
+  top: 4.75rem;
+  right: 1rem;
+  left: auto;
+  bottom: auto;
+  width: min(calc(100vw - 2rem), 30rem);
+  height: auto;
+  max-height: min(38vh, 21rem);
+  border-radius: 0.75rem;
+  border: 1px solid rgba(212, 175, 99, 0.36);
+  box-shadow:
+    0 24px 56px -14px rgba(0, 0, 0, 0.85),
+    inset 0 1px 0 rgba(255, 244, 214, 0.22);
+}
+
+@media (min-width: 1120px) {
+  #copilot-drawer[data-dock="top"] {
+    top: 1rem;
+    width: min(calc(100vw - 38rem), 33rem);
+    max-height: min(38vh, 21.5rem);
+  }
+}
+
+#copilot-drawer[data-dock="top"][data-tucked="true"] {
+  transform: translate3d(0, calc(-100% - 1.5rem), 0) scale(0.98);
+}
+
+/* Aviation Bezel Header & Instrument Rivet Calibration Hairline */
+.avionics-bezel-header {
+  position: relative;
+  background: linear-gradient(
+    180deg,
+    rgba(24, 30, 42, 0.82) 0%,
+    rgba(11, 15, 23, 0.9) 100%
+  );
+  border-bottom: 1px solid rgba(212, 175, 99, 0.24);
+}
+
+.avionics-bezel-header::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    rgba(212, 175, 99, 0.55) 0%,
+    rgba(231, 203, 136, 0.2) 55%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+.avionics-checklist-row {
+  position: relative;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+  background: rgba(8, 11, 17, 0.58);
+  border: 1px solid rgba(226, 232, 240, 0.09);
+}
+
+.avionics-checklist-row:hover {
+  background: rgba(212, 175, 99, 0.11);
+  border-color: rgba(212, 175, 99, 0.44);
+}
+
+/* Smooth safe-zone reflow for bottom cards, command rail, shaping bar & top banners */
 #card-stage,
-#summon-grid {
+#summon-grid,
+#hud-dock,
+#box-shape-bar,
+#flight-hud-banner,
+#box-draw-banner,
+#rec-indicator,
+#render-progress-overlay,
+#toast-container,
+#btn-recall-hud {
   transition:
     transform var(--tuck-enter-ms) var(--ease-out-expo),
     opacity 200ms ease-out,
-    padding-right 240ms var(--ease-out-expo);
+    right 240ms var(--ease-out-expo),
+    left 240ms var(--ease-out-expo),
+    max-width 240ms var(--ease-out-expo);
 }
 
-@media (min-width: 1180px) {
-  body[data-copilot-open="true"] #card-stage,
-  body[data-copilot-open="true"] #summon-grid {
-    padding-right: 22rem;
+@media (min-width: 640px) {
+  body[data-copilot-open="true"][data-copilot-dock="right"] #card-stage,
+  body[data-copilot-open="true"][data-copilot-dock="right"] #summon-grid {
+    right: var(--copilot-bay-w);
   }
+
+  body[data-copilot-open="true"][data-copilot-dock="right"] #hud-dock,
+  body[data-copilot-open="true"][data-copilot-dock="right"] #box-shape-bar,
+  body[data-copilot-open="true"][data-copilot-dock="right"] #flight-hud-banner,
+  body[data-copilot-open="true"][data-copilot-dock="right"] #box-draw-banner,
+  body[data-copilot-open="true"][data-copilot-dock="right"] #rec-indicator,
+  body[data-copilot-open="true"][data-copilot-dock="right"] #render-progress-overlay,
+  body[data-copilot-open="true"][data-copilot-dock="right"] #toast-container {
+    left: calc((100vw - var(--copilot-bay-w)) / 2);
+    max-width: calc(100vw - var(--copilot-bay-w) - 1.5rem);
+  }
+
+  body[data-copilot-open="true"][data-copilot-dock="right"] #btn-recall-hud {
+    right: calc(var(--copilot-bay-w) + 1rem);
+  }
+}
+
+/* Prevent Top Overhead Glareshield from ever colliding with tall bottom cards */
+body[data-copilot-open="true"][data-copilot-dock="top"] #card-stage > section {
+  max-height: 46vh;
+}
+
+/* Clear the upper-left gauge while actively drawing or dragging Geo-Box handles */
+body[data-box-drawing="true"] #flight-cluster-gauge {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(calc(-100% - 1.5rem), 0, 0) scale(0.97);
+}
+
+body[data-box-dragging="true"] #flight-cluster-gauge {
+  opacity: 0.2;
+  pointer-events: none;
+}
+
+body[data-box-strip="true"] #toast-container {
+  bottom: 7.75rem;
 }
 
 /* ==========================================================================
@@ -419,7 +613,15 @@
   .chrono-rail-btn,
   .chrono-needle,
   #card-stage,
-  #summon-grid {
+  #summon-grid,
+  #hud-dock,
+  #box-shape-bar,
+  #flight-hud-banner,
+  #box-draw-banner,
+  #rec-indicator,
+  #render-progress-overlay,
+  #toast-container,
+  #btn-recall-hud {
     transition-duration: 0.01ms !important;
   }
   .tuck-left[data-tucked="true"],
@@ -427,7 +629,9 @@
   .tuck-top[data-tucked="true"],
   .tuck-bottom[data-tucked="true"],
   .tuck-card[data-tucked="true"],
-  .tuck-summon[data-tucked="true"] {
+  .tuck-summon[data-tucked="true"],
+  #copilot-drawer[data-dock][data-tucked="true"],
+  body[data-box-drawing="true"] #flight-cluster-gauge {
     transform: none !important;
   }
   .copilot-spotlight {

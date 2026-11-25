@@ -5,6 +5,8 @@ import type {
   SurveyCompareHook,
   SurveyPathRef,
   SurveyRecord,
+  SurveySplatAnchor,
+  SurveySplatRef,
   SurveyStatus,
   SurveyTilesetRef,
 } from './types';
@@ -58,6 +60,68 @@ export function normalizeSurveyStatus(value: unknown): SurveyStatus {
   return 'planned';
 }
 
+export function inferSplatFormatFromUrl(url: string): string {
+  const clean = url.split(/[?#]/)[0].toLowerCase();
+  if (clean.endsWith('.spz')) return 'spz';
+  if (clean.endsWith('.ksplat')) return 'ksplat';
+  if (clean.endsWith('.splat')) return 'splat';
+  if (clean.endsWith('.ply')) return 'ply';
+  return 'url';
+}
+
+export function sanitizeSplatAnchor(raw: unknown): SurveySplatAnchor | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const lat = Number(r.lat);
+  const lon = Number(r.lon);
+  const baseHeightMeters = Number(r.baseHeightMeters ?? r.alt ?? r.elev_m ?? 0);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(baseHeightMeters)) {
+    return null;
+  }
+  return { lat, lon, baseHeightMeters };
+}
+
+export function normalizeSplatRef(raw: unknown): SurveySplatRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const ionAssetId =
+    typeof r.ionAssetId === 'number' && Number.isFinite(r.ionAssetId) && r.ionAssetId > 0
+      ? r.ionAssetId
+      : null;
+  const url = typeof r.url === 'string' && r.url.trim() ? r.url.trim() : null;
+  if (!ionAssetId && !url) return null;
+
+  const headingDeg =
+    typeof r.headingDeg === 'number' && Number.isFinite(r.headingDeg) ? r.headingDeg : 0;
+  const scale =
+    typeof r.scale === 'number' && Number.isFinite(r.scale) && r.scale > 0 ? r.scale : 1;
+  const offsetMeters =
+    typeof r.offsetMeters === 'number' && Number.isFinite(r.offsetMeters) ? r.offsetMeters : 0;
+
+  return {
+    name: typeof r.name === 'string' && r.name.trim() ? r.name.trim() : undefined,
+    ionAssetId,
+    url,
+    format:
+      typeof r.format === 'string' && r.format.trim()
+        ? r.format.trim()
+        : ionAssetId
+          ? '3dtiles-3dgs'
+          : url
+            ? inferSplatFormatFromUrl(url)
+            : undefined,
+    anchor: sanitizeSplatAnchor(r.anchor),
+    headingDeg,
+    scale,
+    offsetMeters,
+    splatCount:
+      typeof r.splatCount === 'number' && Number.isFinite(r.splatCount) && r.splatCount >= 0
+        ? Math.floor(r.splatCount)
+        : null,
+    lastError: typeof r.lastError === 'string' && r.lastError.trim() ? r.lastError.trim() : null,
+  };
+}
+
 export function classifyTilesetRefs(
   tilesets: SurveyTilesetRef[]
 ): { mesh: SurveyTilesetRef | null; splat: SurveyAssetBundle['splat'] } {
@@ -76,7 +140,13 @@ export function classifyTilesetRefs(
       splat = {
         name: t.name,
         ionAssetId: t.ionAssetId,
+        url: null,
         format: '3dtiles-3dgs',
+        headingDeg: 0,
+        scale: 1,
+        offsetMeters: 0,
+        splatCount: null,
+        lastError: null,
       };
     } else if (!mesh) {
       mesh = { ...t };
@@ -85,11 +155,91 @@ export function classifyTilesetRefs(
   return { mesh, splat };
 }
 
+/**
+ * Honest Status Rule (Part 1):
+ * Creating or editing a survey with a splat ref NEVER promotes status to 'processed'.
+ * Status becomes 'processed' ONLY after `markSurveySplatLoaded()` confirms the splat
+ * actually loaded and was placed on the globe (ion tileset ready, or overlay splatCount > 0).
+ */
+export function applySurveySplatRef(
+  record: SurveyRecord,
+  splat: SurveySplatRef | null,
+  options?: { hasCapture?: boolean }
+): SurveyRecord {
+  const normalized = splat ? normalizeSplatRef(splat) : null;
+  record.assets.splat = normalized;
+  if (normalized) {
+    normalized.lastError = null;
+  }
+  const hasCapture =
+    Boolean(options?.hasCapture) ||
+    Boolean(record.assets.bundleProvenanceSha256) ||
+    record.paths.length > 0 ||
+    record.status === 'captured' ||
+    record.status === 'processed';
+
+  // Never set 'processed' from a ref alone; demote stale 'processed' back to 'captured' until verified loaded
+  if (record.status === 'processed') {
+    record.status = 'captured';
+  } else if (record.status !== 'captured') {
+    record.status = hasCapture ? 'captured' : 'planned';
+  }
+  record.provenance.updatedAt = new Date().toISOString();
+  return record;
+}
+
+export function markSurveySplatLoaded(
+  record: SurveyRecord,
+  details: { splatCount?: number; ionReady?: boolean; anchor?: SurveySplatAnchor | null }
+): SurveyRecord {
+  const validOverlay = typeof details.splatCount === 'number' && details.splatCount > 0;
+  const validIon = details.ionReady === true;
+  if (!validOverlay && !validIon) {
+    return record;
+  }
+  if (record.assets.splat) {
+    record.assets.splat.lastError = null;
+    if (validOverlay) {
+      record.assets.splat.splatCount = Math.floor(details.splatCount!);
+    }
+    if (details.anchor) {
+      record.assets.splat.anchor = { ...details.anchor };
+    }
+  }
+  record.status = 'processed';
+  record.provenance.updatedAt = new Date().toISOString();
+  return record;
+}
+
+export function markSurveySplatLoadError(
+  record: SurveyRecord,
+  errorMessage: string
+): SurveyRecord {
+  const cleanMsg = String(errorMessage || 'Failed to load splat asset.').trim();
+  if (!record.assets.splat) {
+    record.assets.splat = {
+      ionAssetId: null,
+      url: null,
+      headingDeg: 0,
+      scale: 1,
+      offsetMeters: 0,
+      splatCount: null,
+      lastError: cleanMsg,
+    };
+  } else {
+    record.assets.splat.lastError = cleanMsg;
+  }
+  // Keep prior status unchanged on load failure
+  record.provenance.updatedAt = new Date().toISOString();
+  return record;
+}
+
 export function createDefaultSurveyRecord(options?: {
   surveyId?: string;
   capturedAt?: string;
   label?: string;
   status?: SurveyStatus;
+  hasCapture?: boolean;
   notes?: string;
   verticalOffsetMeters?: number;
   tilesets?: SurveyTilesetRef[];
@@ -98,6 +248,7 @@ export function createDefaultSurveyRecord(options?: {
   imageryProvider?: string;
   splatUrl?: string | null;
   splatAssetId?: number | null;
+  splatAnchor?: SurveySplatAnchor | null;
   existingIds?: Iterable<string>;
 }): SurveyRecord {
   const nowIso = new Date().toISOString();
@@ -111,25 +262,33 @@ export function createDefaultSurveyRecord(options?: {
     ? options!.tilesets.map((t) => ({ ...t }))
     : [];
   const classified = classifyTilesetRefs(tilesets);
-  const splat =
+  const splat: SurveySplatRef | null =
     options?.splatUrl || options?.splatAssetId
       ? {
           name: classified.splat?.name || `${label} Splat`,
           ionAssetId: options?.splatAssetId ?? classified.splat?.ionAssetId ?? null,
           url: options?.splatUrl ?? null,
-          format: options?.splatUrl?.toLowerCase().endsWith('.ply')
-            ? 'ply'
-            : options?.splatUrl?.toLowerCase().endsWith('.spz')
-              ? 'spz'
-              : '3dtiles-3dgs',
+          format: options?.splatUrl
+            ? inferSplatFormatFromUrl(options.splatUrl)
+            : '3dtiles-3dgs',
+          anchor: options?.splatAnchor ?? null,
+          headingDeg: 0,
+          scale: 1,
+          offsetMeters: 0,
+          splatCount: null,
+          lastError: null,
         }
       : classified.splat;
 
-  const status: SurveyStatus = options?.status
-    ? normalizeSurveyStatus(options.status)
-    : tilesets.length > 0 || splat
-      ? 'processed'
-      : 'planned';
+  // Honest status: creating a record with a splat ref alone NEVER sets 'processed'.
+  // Keep 'captured' when a splat/tileset/capture exists, or 'planned' when no capture yet.
+  let status: SurveyStatus;
+  if (options?.status) {
+    const requested = normalizeSurveyStatus(options.status);
+    status = requested === 'processed' ? 'captured' : requested;
+  } else {
+    status = options?.hasCapture || tilesets.length > 0 || splat ? 'captured' : 'planned';
+  }
 
   return {
     surveyId,
@@ -314,10 +473,6 @@ export function normalizeSiteManifest(raw: unknown): NormalizedManifestResult {
         rawAssets.imagery && typeof rawAssets.imagery === 'object'
           ? (rawAssets.imagery as Record<string, unknown>)
           : null;
-      const rawSplat =
-        rawAssets.splat && typeof rawAssets.splat === 'object'
-          ? (rawAssets.splat as Record<string, unknown>)
-          : null;
       const rawMesh =
         rawAssets.mesh && typeof rawAssets.mesh === 'object'
           ? sanitizeTilesets([rawAssets.mesh], clipId)[0] ?? null
@@ -327,20 +482,16 @@ export function normalizeSiteManifest(raw: unknown): NormalizedManifestResult {
           ? (s.provenance as Record<string, unknown>)
           : {};
 
-      const splat = rawSplat
-        ? {
-            name: typeof rawSplat.name === 'string' ? rawSplat.name : undefined,
-            ionAssetId: typeof rawSplat.ionAssetId === 'number' ? rawSplat.ionAssetId : null,
-            url: typeof rawSplat.url === 'string' ? rawSplat.url : null,
-            format: typeof rawSplat.format === 'string' ? rawSplat.format : undefined,
-          }
-        : classified.splat;
+      const splat = normalizeSplatRef(rawAssets.splat) ?? classified.splat;
+
+      const explicitStatus = typeof s.status === 'string' ? normalizeSurveyStatus(s.status) : null;
+      const fallbackStatus: SurveyStatus = tilesets.length > 0 || splat ? 'captured' : 'planned';
 
       surveys.push({
         surveyId,
         capturedAt,
         label,
-        status: normalizeSurveyStatus(s.status ?? (tilesets.length > 0 || splat ? 'processed' : 'planned')),
+        status: explicitStatus ?? fallbackStatus,
         notes: typeof s.notes === 'string' && s.notes.trim() ? s.notes.trim() : undefined,
         verticalOffsetMeters:
           typeof s.verticalOffsetMeters === 'number' && Number.isFinite(s.verticalOffsetMeters)

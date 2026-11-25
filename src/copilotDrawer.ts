@@ -146,6 +146,9 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
   const drawer = el<HTMLElement>('copilot-drawer');
   const toggleBtn = el<HTMLButtonElement>('btn-toggle-copilot');
+  const dockBtn = el<HTMLButtonElement>('btn-copilot-dock');
+  const dockLabel = el<HTMLSpanElement>('label-copilot-dock');
+  const dockIcon = document.querySelector<SVGSVGElement>('#icon-copilot-dock');
   const closeBtn = el<HTMLButtonElement>('btn-close-copilot');
   const clearBtn = el<HTMLButtonElement>('btn-copilot-clear');
   const dockDot = el<HTMLSpanElement>('dock-copilot-dot');
@@ -162,6 +165,10 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
   if (!drawer || !messagesEl || !form || !inputEl) return;
 
+  type CopilotDock = 'right' | 'top';
+  const DOCK_STORAGE_KEY = 'nodrone_copilot_dock';
+  let dockMode: CopilotDock =
+    localStorage.getItem(DOCK_STORAGE_KEY) === 'top' ? 'top' : 'right';
   let drawerVisible = false;
   let isBusy = false;
   let history: ConversationContent[] = [];
@@ -191,6 +198,32 @@ export function initCopilotDrawer(controller: NoDroneController): void {
     if (emptyEl) emptyEl.classList.add('hidden');
   }
 
+  function applyDockMode(mode: CopilotDock): void {
+    dockMode = mode;
+    try {
+      localStorage.setItem(DOCK_STORAGE_KEY, mode);
+    } catch {
+      // ignore storage restrictions
+    }
+    drawer?.setAttribute('data-dock', mode);
+    document.body.setAttribute('data-copilot-dock', mode);
+    if (dockLabel) {
+      dockLabel.textContent = mode === 'right' ? 'Top' : 'Side';
+    }
+    if (dockBtn) {
+      dockBtn.title =
+        mode === 'right'
+          ? 'Dock Co-Pilot to Top Overhead'
+          : 'Dock Co-Pilot to Right Vertical Edge';
+    }
+    if (dockIcon) {
+      dockIcon.innerHTML =
+        mode === 'right'
+          ? '<rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 10h18" />'
+          : '<rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" />';
+    }
+  }
+
   function setDrawerVisible(visible: boolean): void {
     drawerVisible = visible;
     if (drawer) {
@@ -211,7 +244,8 @@ export function initCopilotDrawer(controller: NoDroneController): void {
     toggleBtn.setAttribute('data-active', String(drawerVisible));
   }
 
-  // Enforce clean tucked state on initial load
+  // Enforce persisted dock mode and clean tucked state on initial load
+  applyDockMode(dockMode);
   setDrawerVisible(false);
 
   controller.isCopilotDrawerVisible = () => drawerVisible;
@@ -236,13 +270,17 @@ export function initCopilotDrawer(controller: NoDroneController): void {
   function appendUserBubble(text: string): HTMLDivElement {
     hideEmptyState();
     const wrap = document.createElement('div');
-    wrap.className = 'flex justify-end';
+    wrap.className = 'flex flex-col items-end gap-0.5';
+
+    const sender = document.createElement('span');
+    sender.className = 'text-[9px] font-mono tracking-[0.12em] text-[#d4af63]/80 pr-1';
+    sender.textContent = 'PILOT';
 
     const bubble = document.createElement('div');
     bubble.className =
-      'max-w-[85%] rounded-xl rounded-br-sm bg-[#d4af63]/16 border border-[#d4af63]/40 px-3 py-2 text-xs text-[#faf0d4] leading-relaxed whitespace-pre-wrap break-words';
+      'max-w-[88%] rounded-lg rounded-tr-xs bg-[#d4af63]/14 border border-[#d4af63]/38 px-3 py-2 text-xs text-[#faf0d4] leading-relaxed whitespace-pre-wrap break-words';
     bubble.textContent = text;
-    wrap.appendChild(bubble);
+    wrap.append(sender, bubble);
     messagesEl!.appendChild(wrap);
     scrollToBottom();
     return bubble;
@@ -256,19 +294,23 @@ export function initCopilotDrawer(controller: NoDroneController): void {
   } {
     hideEmptyState();
     const root = document.createElement('div');
-    root.className = 'flex flex-col items-start gap-1.5';
+    root.className = 'flex flex-col items-start gap-1';
+
+    const sender = document.createElement('span');
+    sender.className = 'text-[9px] font-mono tracking-[0.12em] text-slate-400 pl-0.5';
+    sender.textContent = 'CO-PILOT';
 
     const chipsRow = document.createElement('div');
-    chipsRow.className = 'hidden flex-wrap gap-1.5 max-w-[95%]';
+    chipsRow.className = 'hidden flex-wrap gap-1.5 max-w-[96%]';
 
     const textBubble = document.createElement('div');
     textBubble.className =
-      'hidden max-w-[90%] rounded-xl rounded-bl-sm bg-black/55 border border-white/10 px-3 py-2 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap break-words';
+      'hidden max-w-[94%] rounded-lg rounded-tl-xs bg-[#0b0f18]/85 border border-white/10 px-3 py-2 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap break-words';
 
     const sourcesRow = document.createElement('div');
-    sourcesRow.className = 'hidden flex-wrap gap-1 max-w-[95%] pt-0.5';
+    sourcesRow.className = 'hidden flex-wrap gap-1 max-w-[96%] pt-0.5';
 
-    root.append(chipsRow, textBubble, sourcesRow);
+    root.append(sender, chipsRow, textBubble, sourcesRow);
     messagesEl!.appendChild(root);
     scrollToBottom();
     return { root, chipsRow, textBubble, sourcesRow };
@@ -395,6 +437,8 @@ export function initCopilotDrawer(controller: NoDroneController): void {
 
     try {
       let finalText = '';
+      let executedToolsCount = 0;
+      const executedToolNames: string[] = [];
       const collectedSources: WebSearchSource[] = [];
 
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -416,7 +460,9 @@ export function initCopilotDrawer(controller: NoDroneController): void {
           collectedSources.push(...data.sources);
         }
 
-        if (data.modelContent) {
+        const hasModelParts =
+          Array.isArray(data.modelContent?.parts) && data.modelContent.parts.length > 0;
+        if (hasModelParts && data.modelContent) {
           history.push(data.modelContent);
         }
 
@@ -424,6 +470,8 @@ export function initCopilotDrawer(controller: NoDroneController): void {
           const responseParts: Array<Record<string, unknown>> = [];
 
           for (const fc of data.functionCalls) {
+            executedToolsCount += 1;
+            executedToolNames.push(fc.name);
             const chip = createToolChip(turnUI.chipsRow, fc.name, fc.args || {});
             const toolResult = await controller.executeTool(fc.name, fc.args || {});
             chip.markResult(toolResult);
@@ -446,21 +494,42 @@ export function initCopilotDrawer(controller: NoDroneController): void {
           continue;
         }
 
-        finalText = data.text || 'Done.';
-        break;
+        const trimmedText = (data.text || '').trim();
+        if (trimmedText) {
+          finalText = trimmedText;
+          break;
+        }
+
+        if (executedToolsCount > 0) {
+          finalText = `Completed: ${Array.from(new Set(executedToolNames)).join(', ')}.`;
+          break;
+        }
+
+        throw new Error(
+          'Co-Pilot returned an empty response and no action was taken. Please rephrase or try again.'
+        );
+      }
+
+      if (!finalText && executedToolsCount > 0) {
+        finalText = `Completed: ${Array.from(new Set(executedToolNames)).join(', ')}.`;
+      }
+      if (!finalText) {
+        throw new Error(
+          'Co-Pilot did not complete the request and no action was taken. Please try again.'
+        );
       }
 
       turnUI.textBubble.className =
-        'max-w-[90%] rounded-xl rounded-bl-sm bg-black/55 border border-white/10 px-3 py-2 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap break-words';
-      turnUI.textBubble.textContent = finalText || 'Done.';
+        'max-w-[94%] rounded-lg rounded-tl-xs bg-[#0b0f18]/85 border border-white/10 px-3 py-2 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap break-words';
+      turnUI.textBubble.textContent = finalText;
       if (collectedSources.length > 0) {
         appendSourcesToRow(turnUI.sourcesRow, collectedSources);
       }
       scrollToBottom();
     } catch (err: any) {
       turnUI.textBubble.remove();
-      // Remove dangling user turn on hard failure so user can retry cleanly
-      if (history.length > 0 && history[history.length - 1].role === 'user') {
+      // Remove dangling user turn on failure when no tools succeeded so history stays balanced
+      while (history.length > 0 && history[history.length - 1].role === 'user') {
         history.pop();
       }
       appendErrorBubble(err?.message || 'Co-Pilot request failed.');
@@ -785,6 +854,11 @@ export function initCopilotDrawer(controller: NoDroneController): void {
     e.stopPropagation();
     const nextOpen = !drawerVisible;
     setDrawerVisible(nextOpen);
+  });
+  dockBtn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    applyDockMode(dockMode === 'right' ? 'top' : 'right');
   });
   closeBtn?.addEventListener('click', (e) => {
     e.preventDefault();

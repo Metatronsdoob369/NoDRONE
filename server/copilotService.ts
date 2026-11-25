@@ -6,7 +6,7 @@ export const COPILOT_FLASH_MODEL = 'gemini-4-hydrogen';
 export const COPILOT_LIVE_MODEL = 'gemini-3.8-live';
 
 export const COPILOT_SYSTEM_INSTRUCTION =
-  'You are the NoDRONE Co-Pilot. You operate the viewer directly with your tools, can guide Joe visually across the chronograph HUD, and can perform live web research using webSearch (or Google Search grounding) for real-time facts, FAA/airspace regulations, site history, landmarks, coordinates, specs, or current events. LIVE VIEWER CONTEXT includes uiState (activeCard, hudMode, visibleControls) showing what panel and buttons are currently on screen. When Joe asks how to do something, where a button is, or asks to open a panel, use openPanel and highlightControl (with exact controlId from visibleControls or known IDs) to spotlight it in gold in real time. When Joe asks to research something or look up current facts, call webSearch and give a crisp, accurate summary (sources appear automatically as links). When Joe asks to perform a viewer action, execute the tool directly and confirm in one short sentence. Heights are metres above the WGS84 ellipsoid. Angles in degrees. Never invent asset IDs; ask if unknown. Before recording, check getWeather and mention any wind advisory. Site manifest keys: schemaVersion, siteId, title, exportedAt, geodesy{sourceCRS, convertedBy, wgs84Origin{lat,lon,ellipsoidalHeight}, verticalOffsetMeters}, layers{worldTerrain, google3DTiles, defaultSSE, clippingGeoJsonAssetId}, tilesets[{name, ionAssetId, type, visible, clippingGeoJsonAssetId}], bookmarks[{name,lat,lon,alt,heading,pitch,roll}]. In voice, keep replies to 1-2 sentences and never read JSON or URLs aloud.';
+  'You are the NoDRONE Co-Pilot. You operate the viewer directly with your tools, can guide Joe visually across the chronograph HUD, and can perform live web research using webSearch (or Google Search grounding) for real-time facts, FAA/airspace regulations, site history, landmarks, coordinates, specs, or current events. Whenever Joe asks to move, drop closer, zoom in, pan, inspect a location, or change a setting, ALWAYS call the appropriate viewer tool (such as flyTo or searchAddress) rather than only replying in text, and NEVER return an empty response. LIVE VIEWER CONTEXT includes uiState (activeCard, hudMode, visibleControls) and surveyCatalog (activeSurveyId, compareSurveyId, surveys). When Joe asks how to do something, where a button is, or asks to open a panel, use openPanel and highlightControl (with exact controlId from visibleControls or known IDs) to spotlight it in gold in real time. When Joe asks to research something or look up current facts, call webSearch and give a crisp, accurate summary (sources appear automatically as links). When Joe asks to perform a viewer action, execute the tool directly and confirm in one short sentence. Heights are metres above the WGS84 ellipsoid. Angles in degrees. Never invent asset IDs; ask if unknown. Before recording, check getWeather and mention any wind advisory. Site manifest schemaVersion 2.0 supports dated surveys[] (surveyId, capturedAt, label, status, assets, bookmarks, paths) plus geodesy and layers. In voice, keep replies to 1-2 sentences and never read JSON or URLs aloud.';
 
 export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
@@ -279,11 +279,11 @@ export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
     name: 'exportManifest',
     description:
-      'Build and download the shared UE5 + Web site_manifest.json (schemaVersion 1.0) and return its JSON object.',
+      'Build and download the shared UE5 + Web site_manifest.json (schemaVersion 2.0 with Survey Catalog) and return its JSON object.',
   },
   {
     name: 'loadManifest',
-    description: 'Load and apply a site_manifest.json (schemaVersion 1.0) into the viewer.',
+    description: 'Load and apply a site_manifest.json (schemaVersion 1.0 or 2.0) into the viewer.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -291,8 +291,60 @@ export const COPILOT_TOOL_DECLARATIONS: FunctionDeclaration[] = [
           type: Type.STRING,
           description: 'Valid JSON string conforming to the NoDRONE site_manifest.json schema.',
         },
+        surveyId: {
+          type: Type.STRING,
+          description: 'Optional surveyId or YYYY-MM-DD date to activate immediately.',
+        },
+        compareSurveyId: {
+          type: Type.STRING,
+          description: 'Optional surveyId to arm as Before/After comparison target.',
+        },
       },
       required: ['json'],
+    },
+  },
+  {
+    name: 'selectSurvey',
+    description: 'Switch the active dated survey epoch in the Survey Catalog and optionally arm a Before/After comparison survey.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        surveyId: {
+          type: Type.STRING,
+          description: 'Target surveyId or YYYY-MM-DD capture date from surveyCatalog.surveys.',
+        },
+        compareSurveyId: {
+          type: Type.STRING,
+          description: 'Optional surveyId to arm as Before/After comparison target (pass empty string to clear).',
+        },
+      },
+      required: ['surveyId'],
+    },
+  },
+  {
+    name: 'createSurvey',
+    description: 'Create a new dated survey epoch in the Survey Catalog.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        capturedAt: {
+          type: Type.STRING,
+          description: 'Capture date in YYYY-MM-DD format.',
+        },
+        label: {
+          type: Type.STRING,
+          description: 'Short label for the epoch (e.g. "Post-Storm", "Q4 Baseline").',
+        },
+        status: {
+          type: Type.STRING,
+          enum: ['planned', 'captured', 'processed'],
+          description: 'Workflow status for this survey epoch.',
+        },
+        splat: {
+          type: Type.STRING,
+          description: 'Optional Cesium ion Asset ID or .ply/.spz URL for the splat.',
+        },
+      },
     },
   },
   {
@@ -411,7 +463,7 @@ export type CopilotProviderId = 'nous' | 'anthropic' | 'gemini';
 export const DEFAULT_NOUS_BASE_URL = 'https://inference-api.nousresearch.com/v1';
 export const DEFAULT_NOUS_MODEL = 'google/gemini-4-hydrogen';
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-5';
-export const GEMINI_FALLBACK_FLASH_MODEL = 'gemini-2.5-flash';
+export const GEMINI_FALLBACK_FLASH_MODEL = 'gemini-3.1-flash-lite';
 
 export interface WebSearchSource {
   title: string;
@@ -850,6 +902,7 @@ async function runNousTurn(
       tools,
       tool_choice: 'auto',
     }),
+    signal: AbortSignal.timeout(25000),
   });
 
   const rawText = await res.text();
@@ -868,8 +921,19 @@ async function runNousTurn(
     throw err;
   }
 
-  const msg = data?.choices?.[0]?.message || {};
-  const text = typeof msg.content === 'string' ? msg.content.trim() : '';
+  const choice = data?.choices?.[0] || {};
+  const msg = choice.message || {};
+  const finishReason = String(choice.finish_reason || '');
+  let text = '';
+  if (typeof msg.content === 'string') {
+    text = msg.content.trim();
+  } else if (Array.isArray(msg.content)) {
+    text = msg.content
+      .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
   const rawToolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
 
   const functionCalls: CopilotTurnResult['functionCalls'] = [];
@@ -896,6 +960,15 @@ async function runNousTurn(
     }
     functionCalls.push({ id, name, args });
     modelParts.push({ functionCall: { id, name, args } });
+  }
+
+  if (!text && functionCalls.length === 0) {
+    const err = new Error(
+      `Nous Portal (${model}) returned an empty turn (finish_reason=${finishReason || 'unknown'}).`
+    );
+    (err as any).statusCode = 502;
+    (err as any).provider = 'nous';
+    throw err;
   }
 
   return {
@@ -993,6 +1066,7 @@ async function runAnthropicTurn(
       messages,
       tools,
     }),
+    signal: AbortSignal.timeout(25000),
   });
 
   const rawText = await res.text();
@@ -1028,8 +1102,18 @@ async function runAnthropicTurn(
     }
   }
 
+  const finalText = textParts.join('\n').trim();
+  if (!finalText && functionCalls.length === 0) {
+    const err = new Error(
+      `Anthropic (${model}) returned an empty turn (stop_reason=${String(data?.stop_reason || 'unknown')}).`
+    );
+    (err as any).statusCode = 502;
+    (err as any).provider = 'anthropic';
+    throw err;
+  }
+
   return {
-    text: textParts.join('\n').trim(),
+    text: finalText,
     functionCalls,
     modelContent: modelParts.length > 0 ? ({ role: 'model', parts: modelParts } as Content) : null,
     model,
@@ -1057,16 +1141,20 @@ async function runGeminiTurn(
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
+        // Attempt 1 on primary Flash uses function declarations + Google Search;
+        // Attempt 2 drops Google Search grounding to avoid MALFORMED_FUNCTION_CALL / empty-part collisions
+        const useCombinedSearch = modelName === COPILOT_FLASH_MODEL && attempt === 1;
         const config: Record<string, unknown> = {
           systemInstruction: buildSystemInstructionWithContext(context),
-          tools:
-            modelName === COPILOT_FLASH_MODEL
-              ? [{ googleSearch: {} }, { functionDeclarations: COPILOT_TOOL_DECLARATIONS }]
-              : [{ functionDeclarations: COPILOT_TOOL_DECLARATIONS }],
+          tools: useCombinedSearch
+            ? [{ googleSearch: {} }, { functionDeclarations: COPILOT_TOOL_DECLARATIONS }]
+            : [{ functionDeclarations: COPILOT_TOOL_DECLARATIONS }],
         };
         if (modelName === COPILOT_FLASH_MODEL) {
           config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-          config.toolConfig = { includeServerSideToolInvocations: true };
+          if (useCombinedSearch) {
+            config.toolConfig = { includeServerSideToolInvocations: true };
+          }
         }
         const response = await client.models.generateContent({
           model: modelName,
@@ -1074,7 +1162,9 @@ async function runGeminiTurn(
           config,
         });
 
-        const modelContent = response.candidates?.[0]?.content ?? null;
+        const candidate = response.candidates?.[0];
+        const finishReason = String(candidate?.finishReason || '');
+        const modelContent = candidate?.content ?? null;
         const rawCalls = response.functionCalls ?? [];
         const functionCalls = rawCalls
           .filter((fc): fc is NonNullable<typeof fc> & { name: string } => Boolean(fc?.name))
@@ -1085,8 +1175,38 @@ async function runGeminiTurn(
           }));
         const sources = extractGroundingSources(response);
 
+        let text = (response.text ?? '').trim();
+        if (!text && Array.isArray(modelContent?.parts)) {
+          text = modelContent.parts
+            .filter((p: any) => !p?.thought && typeof p?.text === 'string' && p.text.trim())
+            .map((p: any) => String(p.text).trim())
+            .join('\n')
+            .trim();
+        }
+
+        if (!text && functionCalls.length === 0) {
+          console.warn(
+            `Gemini (${modelName}, attempt ${attempt}) returned empty turn (finishReason=${finishReason || 'unknown'}).`
+          );
+          if (attempt < maxAttempts) {
+            continue;
+          }
+          if (modelName !== GEMINI_FALLBACK_FLASH_MODEL) {
+            lastErr = new Error(
+              `Gemini (${modelName}) returned an empty response (${finishReason || 'empty'}).`
+            );
+            break;
+          }
+          const emptyErr = new Error(
+            `Co-Pilot returned an empty response (${finishReason || 'no content'}). Please rephrase or retry.`
+          );
+          (emptyErr as any).statusCode = 502;
+          (emptyErr as any).provider = 'gemini';
+          throw emptyErr;
+        }
+
         return {
-          text: (response.text ?? '').trim(),
+          text,
           functionCalls,
           modelContent,
           model: modelName,
@@ -1109,8 +1229,7 @@ async function runGeminiTurn(
           await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
           continue;
         }
-        if (isQuota && modelName !== GEMINI_FALLBACK_FLASH_MODEL) {
-          // Try higher-quota Flash fallback before surfacing 429
+        if ((isQuota || status === 502) && modelName !== GEMINI_FALLBACK_FLASH_MODEL) {
           break;
         }
         throw err;
