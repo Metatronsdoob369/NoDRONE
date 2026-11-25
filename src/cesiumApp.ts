@@ -15,6 +15,7 @@ import type {
   SiteManifest,
   SiteWeatherData,
   SurveyRecord,
+  SurveySplatAnchor,
   SurveyStatus,
   SurveyTilesetRef,
   TilesetEntry,
@@ -46,15 +47,24 @@ import {
 } from './geodesy';
 import { MAJOR_CITIES, US_STATES, WORLD_COUNTRIES } from './placesDataset';
 import {
+  applySurveySplatRef,
   classifyTilesetRefs,
   createDefaultSurveyRecord,
   createSurveyId,
+  inferSplatFormatFromUrl,
+  markSurveySplatLoadError,
+  markSurveySplatLoaded,
   normalizeSiteManifest,
   normalizeSurveyStatus,
   resolveSurveySelection,
   sortSurveysNewestFirst,
   toIsoDateOnly,
 } from './surveyCatalog';
+import {
+  createSplatOverlayManager,
+  isSupportedSplatFileName,
+  type SplatOverlayManager,
+} from './splatOverlay';
 import {
   buildFlightExport,
   isFlightCameraPathDocument,
@@ -324,6 +334,9 @@ let cameraPathRemove: (() => void) | null = null;
   let isCapturingGeoBox = false;
   let geoBoxCaptureCancelled = false;
 
+  // Transparent Three.js WebGPU / WebGL2 Gaussian Splat Overlay Manager
+  let splatOverlay: SplatOverlayManager | null = null;
+
   // Map Labels Overlay & Live Reverse-Geocode Location State
   let mapLabelsEnabled = true;
   let mapLabelsTempHidden = false;
@@ -383,6 +396,8 @@ let cameraPathRemove: (() => void) | null = null;
   const flightClusterGauge = el<HTMLElement>('flight-cluster-gauge');
   const boxDrawBanner = el<HTMLDivElement>('box-draw-banner');
   const boxDrawBannerText = el<HTMLSpanElement>('box-draw-banner-text');
+  const boxShapeBar = el<HTMLDivElement>('box-shape-bar');
+  const boxShapeDims = el<HTMLSpanElement>('box-shape-dims');
   const spotlightTag = el<HTMLDivElement>('copilot-spotlight-tag');
   const healthLogList = el<HTMLDivElement>('health-log-list');
   const tilesetListEl = el<HTMLDivElement>('tileset-list');
@@ -1864,6 +1879,7 @@ let cameraPathRemove: (() => void) | null = null;
       document.querySelector('header') as HTMLElement | null,
       flightClusterGauge,
       boxDrawBanner,
+      boxShapeBar,
       cardStage,
       summonGrid,
       spotlightTag,
@@ -1894,6 +1910,8 @@ let cameraPathRemove: (() => void) | null = null;
     const perFrameWaitMs: number[] = [];
     const perFrameFovRad: number[] = [];
     const perFrameFovDeg: number[] = [];
+    const perFrameSplatCount: number[] = [];
+    let anyOverlaySplats = false;
     const chunkEntries: ZipEntryInput[] = [];
     let partIndex = 1;
     let chunkStartFrame = 1;
@@ -2051,13 +2069,26 @@ let cameraPathRemove: (() => void) | null = null;
           Number.isFinite(appliedFov) ? Number(Cesium.Math.toDegrees(appliedFov).toFixed(3)) : 0
         );
 
-        // Final render immediately before reading WebGL backbuffer
+        // Final render immediately before reading WebGL backbuffer, then sync overlay splat canvas
         viewer.scene.render();
+        const overlayCanvas = splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null;
+        const overlayStats = splatOverlay?.getActiveSplatStats();
+        const frameSplatCount =
+          overlayCanvas && overlayStats?.hasVisibleSplat ? overlayStats.splatCount : 0;
+        if (frameSplatCount > 0) anyOverlaySplats = true;
+        perFrameSplatCount.push(frameSplatCount);
 
         let jpegBlob: Blob;
         if (outputCtx) {
           outputCtx.clearRect(0, 0, targetW, targetH);
           outputCtx.drawImage(canvas, 0, 0, targetW, targetH);
+          if (overlayCanvas) {
+            try {
+              outputCtx.drawImage(overlayCanvas, 0, 0, targetW, targetH);
+            } catch {
+              // Ignore transient overlay draw issues
+            }
+          }
           compositeCreditsOntoFrame(outputCtx, targetW, targetH, container, logoSafetyCache);
           try {
             jpegBlob = await captureCanvasJpegBlob(outputCanvas, 0.95);
@@ -2168,6 +2199,7 @@ let cameraPathRemove: (() => void) | null = null;
       const finishedAt = new Date().toISOString();
       const firstFovRad = perFrameFovRad.length > 0 ? perFrameFovRad[0] : null;
       const firstFovDeg = perFrameFovDeg.length > 0 ? perFrameFovDeg[0] : null;
+      const maxOverlaySplatCount = perFrameSplatCount.reduce((m, n) => (n > m ? n : m), 0);
       const renderLog = {
         frameCount: renderedFrames,
         fps: path.fps,
@@ -2178,6 +2210,9 @@ let cameraPathRemove: (() => void) | null = null;
         perFrameFovRad,
         perFrameFovDeg,
         perFrameWaitMs,
+        overlaySplats: anyOverlaySplats,
+        overlaySplatCount: maxOverlaySplatCount,
+        perFrameSplatCount,
         startedAt,
         finishedAt,
         outputMode: dirHandle ? 'folder' : 'zip-parts',
@@ -2226,8 +2261,41 @@ let cameraPathRemove: (() => void) | null = null;
   function capturePngSnapshot(): boolean {
     if (!viewer || !viewer.scene) return false;
     try {
+      const container = document.getElementById('cesium-container') as HTMLElement | null;
+      const cesiumCanvas = viewer.scene.canvas as HTMLCanvasElement;
+      const targetW = cesiumCanvas.width || 1280;
+      const targetH = cesiumCanvas.height || 720;
+
       viewer.render();
-      const dataUrl = viewer.scene.canvas.toDataURL('image/png');
+      const overlayCanvas = splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null;
+
+      let dataUrl: string;
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = targetW;
+      outCanvas.height = targetH;
+      const outCtx = outCanvas.getContext('2d');
+      if (outCtx) {
+        outCtx.clearRect(0, 0, targetW, targetH);
+        outCtx.drawImage(cesiumCanvas, 0, 0, targetW, targetH);
+        if (overlayCanvas) {
+          try {
+            outCtx.drawImage(overlayCanvas, 0, 0, targetW, targetH);
+          } catch {
+            // Ignore transient overlay draw errors
+          }
+        }
+        if (container) {
+          compositeCreditsOntoFrame(outCtx, targetW, targetH, container, new Map<string, boolean>());
+        }
+        try {
+          dataUrl = outCanvas.toDataURL('image/png');
+        } catch {
+          dataUrl = cesiumCanvas.toDataURL('image/png');
+        }
+      } else {
+        dataUrl = cesiumCanvas.toDataURL('image/png');
+      }
+
       const a = document.createElement('a');
       const siteTitle = (el<HTMLInputElement>('input-site-title')?.value || 'nodrone-view')
         .trim()
@@ -2702,11 +2770,17 @@ let cameraPathRemove: (() => void) | null = null;
     }
 
     const hasBox = geoBox !== null;
-    [btnVis, btnFrame, btnClear, btnJson, btnGeoJson, btnCopy].forEach((b) => {
+    const btnShapeMode = el<HTMLButtonElement>('btn-box-shape-mode');
+    const btnStripCapture = el<HTMLButtonElement>('btn-box-strip-capture');
+    [btnShapeMode, btnVis, btnFrame, btnClear, btnJson, btnGeoJson, btnCopy].forEach((b) => {
       if (b) b.disabled = !hasBox;
     });
+    const captureDisabled = !hasBox || isCapturingGeoBox || isRenderingPath || isRecording;
     if (btnBundle) {
-      btnBundle.disabled = !hasBox || isCapturingGeoBox || isRenderingPath || isRecording;
+      btnBundle.disabled = captureDisabled;
+    }
+    if (btnStripCapture) {
+      btnStripCapture.disabled = captureDisabled;
     }
 
     if (!geoBox) {
@@ -2720,6 +2794,7 @@ let cameraPathRemove: (() => void) | null = null;
       if (areaEl) areaEl.textContent = '-- m²';
       if (altEl) altEl.textContent = '-- → -- m';
       if (centerEl) centerEl.textContent = '--°, --°';
+      if (boxShapeDims) boxShapeDims.textContent = '-- × -- × -- m';
       if (inpSouth && document.activeElement !== inpSouth) inpSouth.value = '';
       if (inpNorth && document.activeElement !== inpNorth) inpNorth.value = '';
       if (inpWest && document.activeElement !== inpWest) inpWest.value = '';
@@ -2728,6 +2803,7 @@ let cameraPathRemove: (() => void) | null = null;
         btnVis.textContent = 'Visible';
         btnVis.setAttribute('data-active', 'true');
       }
+      syncBoxShapeBarVisibility();
       return;
     }
 
@@ -2745,6 +2821,9 @@ let cameraPathRemove: (() => void) | null = null;
       altEl.textContent = `${Math.round(m.baseEllipsoidalMeters)} → ${Math.round(m.ceilingEllipsoidalMeters)} m`;
     }
     if (centerEl) centerEl.textContent = `${m.centerLat.toFixed(5)}°, ${m.centerLon.toFixed(5)}°`;
+    if (boxShapeDims) {
+      boxShapeDims.textContent = `${m.widthMeters.toFixed(0)} × ${m.depthMeters.toFixed(0)} × ${m.heightMeters.toFixed(0)} m`;
+    }
 
     if (inpSouth && document.activeElement !== inpSouth) inpSouth.value = m.south.toFixed(6);
     if (inpNorth && document.activeElement !== inpNorth) inpNorth.value = m.north.toFixed(6);
@@ -2761,6 +2840,21 @@ let cameraPathRemove: (() => void) | null = null;
       btnVis.textContent = geoBox.visible ? 'Visible' : 'Hidden';
       btnVis.setAttribute('data-active', String(geoBox.visible));
     }
+    syncBoxShapeBarVisibility();
+  }
+
+  function syncBoxShapeBarVisibility(): void {
+    const shouldShow =
+      geoBox !== null &&
+      !geoBoxDrawing &&
+      !isCapturingGeoBox &&
+      !isRenderingPath &&
+      hudMode === 'rail' &&
+      activeCard === null;
+    if (boxShapeBar) {
+      boxShapeBar.classList.toggle('hidden', !shouldShow);
+    }
+    document.body.setAttribute('data-box-strip', String(shouldShow));
   }
 
   function refreshGeoBoxGraphics(): void {
@@ -2797,6 +2891,7 @@ let cameraPathRemove: (() => void) | null = null;
       geoBoxDragHandler = null;
     }
     geoBoxDraggingCorner = null;
+    document.body.setAttribute('data-box-dragging', 'false');
   }
 
   function ensureGeoBoxDragHandler(): void {
@@ -2817,6 +2912,8 @@ let cameraPathRemove: (() => void) | null = null;
         handle === 'base'
       ) {
         geoBoxDraggingCorner = handle;
+        document.body.setAttribute('data-box-dragging', 'true');
+        if (activeCard !== null) setActiveCard(null);
         viewer.scene.screenSpaceCameraController.enableRotate = false;
         viewer.scene.screenSpaceCameraController.enableTranslate = false;
         viewer.scene.screenSpaceCameraController.enableZoom = false;
@@ -2904,6 +3001,7 @@ let cameraPathRemove: (() => void) | null = null;
       if (!geoBoxDraggingCorner) return;
       const dragged = geoBoxDraggingCorner;
       geoBoxDraggingCorner = null;
+      document.body.setAttribute('data-box-dragging', 'false');
       viewer.scene.screenSpaceCameraController.enableRotate = true;
       viewer.scene.screenSpaceCameraController.enableTranslate = true;
       viewer.scene.screenSpaceCameraController.enableZoom = true;
@@ -2931,6 +3029,7 @@ let cameraPathRemove: (() => void) | null = null;
     }
 
     if (!active) {
+      document.body.setAttribute('data-box-drawing', 'false');
       if (boxDrawBanner) boxDrawBanner.classList.add('hidden');
       if (viewer?.scene?.canvas) viewer.scene.canvas.style.cursor = '';
       syncGeoBoxUI();
@@ -2939,6 +3038,7 @@ let cameraPathRemove: (() => void) | null = null;
 
     if (!viewer) {
       geoBoxDrawing = false;
+      document.body.setAttribute('data-box-drawing', 'false');
       return;
     }
 
@@ -2947,9 +3047,11 @@ let cameraPathRemove: (() => void) | null = null;
 
     // Tuck active card out of the way so the user has an unobstructed globe while picking corners
     setActiveCard(null);
+    document.body.setAttribute('data-box-drawing', 'true');
     if (boxDrawBanner) boxDrawBanner.classList.remove('hidden');
     if (boxDrawBannerText) boxDrawBannerText.textContent = 'Click corner 1 on the 3D globe or tileset';
     viewer.scene.canvas.style.cursor = 'crosshair';
+    syncBoxShapeBarVisibility();
 
     geoBoxDrawHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
 
@@ -3027,10 +3129,9 @@ let cameraPathRemove: (() => void) | null = null;
 
       setGeoBoxDrawing(false);
       refreshGeoBoxGraphics();
-      setActiveCard('box');
       const m = computeGeoBoxMetrics(geoBox);
       showToast(
-        `Geo-Box locked (${m.widthMeters.toFixed(0)}×${m.depthMeters.toFixed(0)}×${m.heightMeters.toFixed(0)}m) — drag ↕ TOP/BASE or corners`
+        `Geo-Box locked (${m.widthMeters.toFixed(0)}×${m.depthMeters.toFixed(0)}×${m.heightMeters.toFixed(0)}m) — drag corners or ↕ TOP/BASE`
       );
       logEvent(
         `Geo-Box locked (${m.widthMeters.toFixed(1)}×${m.depthMeters.toFixed(1)}×${m.heightMeters.toFixed(1)}m @ ${m.centerLat.toFixed(5)}°, ${m.centerLon.toFixed(5)}°).`,
@@ -3748,6 +3849,7 @@ let cameraPathRemove: (() => void) | null = null;
       document.querySelector('header') as HTMLElement | null,
       flightClusterGauge,
       boxDrawBanner,
+      boxShapeBar,
       cardStage,
       summonGrid,
       spotlightTag,
@@ -3822,11 +3924,19 @@ let cameraPathRemove: (() => void) | null = null;
         await waitForRenderFrameSettled(12000);
         if (geoBoxCaptureCancelled) break;
         viewer.scene.render();
+        const overlayCanvas = splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null;
 
         let pngBlob: Blob;
         if (outputCtx) {
           outputCtx.clearRect(0, 0, targetW, targetH);
           outputCtx.drawImage(canvas, 0, 0, targetW, targetH);
+          if (overlayCanvas) {
+            try {
+              outputCtx.drawImage(overlayCanvas, 0, 0, targetW, targetH);
+            } catch {
+              // Ignore transient overlay draw errors
+            }
+          }
           compositeCreditsOntoFrame(outputCtx, targetW, targetH, container, logoSafetyCache);
           try {
             pngBlob = await captureCanvasPngBlob(outputCanvas);
@@ -3888,9 +3998,16 @@ let cameraPathRemove: (() => void) | null = null;
           data: provenanceBytes,
         });
 
-        // Stamp capture provenance & path reference onto the active Survey Catalog epoch
+        // Stamp capture provenance, Geo-Box splat anchor, & path reference onto the active Survey Catalog epoch
         const activeSurvey = getActiveSurvey();
         activeSurvey.assets.bundleProvenanceSha256 = provenanceDigest;
+        if (activeSurvey.assets.splat && !activeSurvey.assets.splat.anchor) {
+          activeSurvey.assets.splat.anchor = {
+            lat: m.centerLat,
+            lon: m.centerLon,
+            baseHeightMeters: m.baseEllipsoidalMeters,
+          };
+        }
         if (activeSurvey.status === 'planned') {
           activeSurvey.status = 'captured';
         }
@@ -4623,12 +4740,19 @@ let cameraPathRemove: (() => void) | null = null;
         if (ionStatusText) ionStatusText.textContent = 'OSM Globe (No ion Token)';
       }
 
-      // Initial panel & HUD visibility is already synced synchronously before async globe setup.
+      // Initialize transparent Three.js WebGPU / WebGL2 Gaussian Splat overlay stacked over #cesium-container
+      const cesiumHost = document.getElementById('cesium-container');
+      if (cesiumHost) {
+        splatOverlay = createSplatOverlayManager(cesiumHost, { onLog: logEvent });
+      }
 
-      // Scene hooks: Pre-update for Drone Flight, Post-render for Telemetry, Camera listeners for Horizon Culling, Weather & Location Sync
+      // Scene hooks: Pre-update for Drone Flight, Post-render for Splat Overlay + Telemetry, Camera listeners for Horizon Culling, Weather & Location Sync
       viewer.camera.percentageChanged = 0.05;
       viewer.scene.preUpdate.addEventListener(handlePreUpdate);
-      viewer.scene.postRender.addEventListener(updateTelemetry);
+      viewer.scene.postRender.addEventListener(() => {
+        splatOverlay?.renderFrame(viewer);
+        updateTelemetry();
+      });
       viewer.camera.changed.addEventListener(updateMapLabelHorizonVisibility);
       viewer.camera.moveEnd.addEventListener(updateMapLabelHorizonVisibility);
       viewer.camera.moveEnd.addEventListener(scheduleCameraWeatherSync);
@@ -5156,6 +5280,13 @@ let cameraPathRemove: (() => void) | null = null;
     activeTilesets.forEach((item) => {
       applyHeightOffsetToTileset(item.tileset, currentHeightOffset);
     });
+    const active = surveyCatalog.find((s) => s.surveyId === activeSurveyId);
+    if (active) {
+      active.verticalOffsetMeters = currentHeightOffset;
+      splatOverlay?.updatePlacement(active.surveyId, {
+        verticalOffsetMeters: currentHeightOffset,
+      });
+    }
     return currentHeightOffset;
   }
 
@@ -5411,7 +5542,11 @@ let cameraPathRemove: (() => void) | null = null;
     return found;
   }
 
-  function parseSplatReferenceInput(raw: string, label: string): SurveyRecord['assets']['splat'] {
+  function parseSplatReferenceInput(
+    raw: string,
+    label: string,
+    existing?: SurveyRecord['assets']['splat']
+  ): SurveyRecord['assets']['splat'] {
     const trimmed = raw.trim();
     if (!trimmed) return null;
     if (/^\d+$/.test(trimmed)) {
@@ -5422,23 +5557,237 @@ let cameraPathRemove: (() => void) | null = null;
           ionAssetId: id,
           url: null,
           format: '3dtiles-3dgs',
+          anchor: existing?.anchor ?? null,
+          headingDeg: existing?.headingDeg ?? 0,
+          scale: existing?.scale ?? 1,
+          offsetMeters: existing?.offsetMeters ?? 0,
+          splatCount: null,
+          lastError: null,
         };
       }
     }
-    const lower = trimmed.toLowerCase();
-    const format = lower.endsWith('.ply')
-      ? 'ply'
-      : lower.endsWith('.spz')
-        ? 'spz'
-        : lower.endsWith('.splat')
-          ? 'splat'
-          : 'url';
+    const format = inferSplatFormatFromUrl(trimmed);
     return {
       name: `${label} Splat`,
       ionAssetId: null,
       url: trimmed,
       format,
+      anchor: existing?.anchor ?? null,
+      headingDeg: existing?.headingDeg ?? 0,
+      scale: existing?.scale ?? 1,
+      offsetMeters: existing?.offsetMeters ?? 0,
+      splatCount: null,
+      lastError: null,
     };
+  }
+
+  /**
+   * Resolves the geographic ENU anchor for a survey's overlay splat:
+   * 1. Existing survey splat anchor (unless `preferGeoBox` is requested for re-anchoring)
+   * 2. Active Geo-Box center (lat, lon, baseEllipsoidalMeters)
+   * 3. Current viewport surface pick / camera ground nadir
+   * 4. First camera bookmark / continental fallback
+   */
+  function resolveAnchorForSurvey(
+    survey: SurveyRecord,
+    preferGeoBox = false
+  ): SurveySplatAnchor {
+    if (!preferGeoBox && survey.assets.splat?.anchor) {
+      return { ...survey.assets.splat.anchor };
+    }
+    if (geoBox) {
+      const m = computeGeoBoxMetrics(geoBox);
+      return {
+        lat: m.centerLat,
+        lon: m.centerLon,
+        baseHeightMeters: m.baseEllipsoidalMeters,
+      };
+    }
+    if (survey.assets.splat?.anchor) {
+      return { ...survey.assets.splat.anchor };
+    }
+    if (viewer?.scene?.canvas) {
+      const canvas = viewer.scene.canvas as HTMLCanvasElement;
+      const centerPx = new Cesium.Cartesian2(
+        (canvas.clientWidth || canvas.width || 1280) * 0.5,
+        (canvas.clientHeight || canvas.height || 720) * 0.5
+      );
+      const picked = pickGeoSurfacePoint(centerPx);
+      if (picked) {
+        return {
+          lat: picked.lat,
+          lon: picked.lon,
+          baseHeightMeters: Number.isFinite(picked.height) ? picked.height : 0,
+        };
+      }
+      const carto = viewer.camera?.positionCartographic;
+      if (carto) {
+        return {
+          lat: Cesium.Math.toDegrees(carto.latitude),
+          lon: Cesium.Math.toDegrees(carto.longitude),
+          baseHeightMeters: 0,
+        };
+      }
+    }
+    const bm = survey.bookmarks[0] || cameraBookmarks[0];
+    if (bm) {
+      return {
+        lat: bm.lat,
+        lon: bm.lon,
+        baseHeightMeters: Math.max(0, bm.alt - 60),
+      };
+    }
+    return { lat: 38.5, lon: -96.0, baseHeightMeters: 0 };
+  }
+
+  /**
+   * Loads (or re-activates from cache) the Three.js overlay Gaussian Splat for a survey,
+   * updating status honestly: promotes to `'processed'` ONLY when splatCount > 0, or
+   * preserves prior status + records `assets.splat.lastError` on failure.
+   */
+  async function activateSurveyOverlaySplat(
+    survey: SurveyRecord,
+    options?: { silent?: boolean; forceReload?: boolean }
+  ): Promise<boolean> {
+    if (!splatOverlay) return false;
+    const splat = survey.assets.splat;
+    if (!splat || !splat.url) {
+      splatOverlay.setActiveSurvey(null);
+      return false;
+    }
+
+    const anchor = resolveAnchorForSurvey(survey, false);
+    splat.anchor = anchor;
+    const placement = {
+      anchor,
+      verticalOffsetMeters:
+        typeof survey.verticalOffsetMeters === 'number' && Number.isFinite(survey.verticalOffsetMeters)
+          ? survey.verticalOffsetMeters
+          : currentHeightOffset,
+      headingDeg: typeof splat.headingDeg === 'number' ? splat.headingDeg : 0,
+      scale: typeof splat.scale === 'number' && splat.scale > 0 ? splat.scale : 1,
+      offsetMeters: typeof splat.offsetMeters === 'number' ? splat.offsetMeters : 0,
+    };
+
+    if (!options?.forceReload && splatOverlay.hasCachedSplat(survey.surveyId, splat.url)) {
+      splatOverlay.updatePlacement(survey.surveyId, placement);
+      splatOverlay.setActiveSurvey(survey.surveyId);
+      const stats = splatOverlay.getActiveSplatStats();
+      if (stats.splatCount > 0) {
+        markSurveySplatLoaded(survey, { splatCount: stats.splatCount, anchor });
+      }
+      renderSurveyCatalogUI();
+      notifyUiStateChanged();
+      return true;
+    }
+
+    // Local file references (`local-file://...`) can only be loaded from live drop cache
+    if (splat.url.startsWith('local-file://')) {
+      const msg = `Local splat "${splat.url.replace(/^local-file:\/\//, '')}" must be dropped onto the globe again in this session.`;
+      markSurveySplatLoadError(survey, msg);
+      splatOverlay.setActiveSurvey(null);
+      renderSurveyCatalogUI();
+      if (!options?.silent) showToast(msg, 'error');
+      return false;
+    }
+
+    try {
+      if (!options?.silent) {
+        showToast(`Loading splat overlay (${splat.format || '3DGS'})…`, 'info');
+      }
+      const res = await splatOverlay.loadSurveySplatFromUrl(survey.surveyId, splat.url, placement);
+      if (res.splatCount > 0) {
+        markSurveySplatLoaded(survey, { splatCount: res.splatCount, anchor: res.anchor });
+        if (activeSurveyId === survey.surveyId) {
+          splatOverlay.setActiveSurvey(survey.surveyId);
+        }
+        renderSurveyCatalogUI();
+        notifyUiStateChanged();
+        if (!options?.silent) {
+          showToast(
+            `Splat placed (${res.splatCount.toLocaleString()} splats · ${res.backend.toUpperCase()})`
+          );
+        }
+        return true;
+      }
+      throw new Error('Splat file loaded with 0 valid Gaussian splats.');
+    } catch (err: any) {
+      const reason = err?.message ? String(err.message) : 'Failed to load splat URL.';
+      markSurveySplatLoadError(survey, reason);
+      if (activeSurveyId === survey.surveyId) {
+        splatOverlay.setActiveSurvey(null);
+      }
+      logEvent(`Splat load failed for "${survey.surveyId}": ${reason}`, 'error');
+      renderSurveyCatalogUI();
+      notifyUiStateChanged();
+      if (!options?.silent) {
+        showToast(`Splat failed: ${reason}`, 'error');
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Attaches a drag-and-dropped local `.spz`/`.ply`/`.splat`/`.ksplat` file to the active survey.
+   */
+  async function attachDroppedSplatFile(file: File): Promise<boolean> {
+    if (!splatOverlay) {
+      showToast('3D viewport is not initialized yet.', 'error');
+      return false;
+    }
+    const active = getActiveSurvey();
+    const anchor = resolveAnchorForSurvey(active, false);
+    const localRef = `local-file://${file.name}`;
+    const existing = active.assets.splat;
+
+    applySurveySplatRef(active, {
+      name: file.name,
+      ionAssetId: null,
+      url: localRef,
+      format: inferSplatFormatFromUrl(file.name),
+      anchor,
+      headingDeg: existing?.headingDeg ?? 0,
+      scale: existing?.scale ?? 1,
+      offsetMeters: existing?.offsetMeters ?? 0,
+    });
+    surveyCatalogTouched = true;
+    renderSurveyCatalogUI();
+
+    const placement = {
+      anchor,
+      verticalOffsetMeters:
+        typeof active.verticalOffsetMeters === 'number' && Number.isFinite(active.verticalOffsetMeters)
+          ? active.verticalOffsetMeters
+          : currentHeightOffset,
+      headingDeg: active.assets.splat?.headingDeg ?? 0,
+      scale: active.assets.splat?.scale ?? 1,
+      offsetMeters: active.assets.splat?.offsetMeters ?? 0,
+    };
+
+    try {
+      showToast(`Loading dropped splat "${file.name}"…`, 'info');
+      const res = await splatOverlay.loadSurveySplatFromFile(active.surveyId, file, placement);
+      if (res.splatCount > 0) {
+        markSurveySplatLoaded(active, { splatCount: res.splatCount, anchor: res.anchor });
+        splatOverlay.setActiveSurvey(active.surveyId);
+        renderSurveyCatalogUI();
+        notifyUiStateChanged();
+        showToast(
+          `Attached "${file.name}" (${res.splatCount.toLocaleString()} splats) to ${active.label}`
+        );
+        return true;
+      }
+      throw new Error(`"${file.name}" contained 0 valid Gaussian splats.`);
+    } catch (err: any) {
+      const reason = err?.message ? String(err.message) : `Failed to parse "${file.name}".`;
+      markSurveySplatLoadError(active, reason);
+      splatOverlay.setActiveSurvey(null);
+      logEvent(`Dropped splat failed ("${file.name}"): ${reason}`, 'error');
+      renderSurveyCatalogUI();
+      notifyUiStateChanged();
+      showToast(`Splat failed: ${reason}`, 'error');
+      return false;
+    }
   }
 
   function formatSplatReferenceInput(splat: SurveyRecord['assets']['splat']): string {
@@ -5570,6 +5919,49 @@ let cameraPathRemove: (() => void) | null = null;
       splatInput.value = formatSplatReferenceInput(active.assets.splat);
     }
 
+    // Inline splat load error banner
+    const splatErrEl = el<HTMLDivElement>('survey-splat-error');
+    if (splatErrEl) {
+      const errText = active.assets.splat?.lastError || '';
+      if (errText) {
+        splatErrEl.textContent = `Splat error: ${errText}`;
+        splatErrEl.classList.remove('hidden');
+      } else {
+        splatErrEl.textContent = '';
+        splatErrEl.classList.add('hidden');
+      }
+    }
+
+    // Per-splat placement nudge sliders (heading / scale / Z offset) when an overlay splat URL/file is attached
+    const splatNudgesEl = el<HTMLDivElement>('survey-splat-nudges');
+    const splatCountEl = el<HTMLSpanElement>('survey-splat-count');
+    const sliderHdg = el<HTMLInputElement>('slider-splat-heading');
+    const valHdg = el<HTMLSpanElement>('val-splat-heading');
+    const sliderScale = el<HTMLInputElement>('slider-splat-scale');
+    const valScale = el<HTMLSpanElement>('val-splat-scale');
+    const sliderOff = el<HTMLInputElement>('slider-splat-offset');
+    const valOff = el<HTMLSpanElement>('val-splat-offset');
+    const hasOverlaySplatRef = Boolean(active.assets.splat?.url);
+    if (splatNudgesEl) {
+      splatNudgesEl.classList.toggle('hidden', !hasOverlaySplatRef);
+    }
+    if (hasOverlaySplatRef && active.assets.splat) {
+      const hdg = typeof active.assets.splat.headingDeg === 'number' ? active.assets.splat.headingDeg : 0;
+      const scl = typeof active.assets.splat.scale === 'number' ? active.assets.splat.scale : 1;
+      const off = typeof active.assets.splat.offsetMeters === 'number' ? active.assets.splat.offsetMeters : 0;
+      if (sliderHdg && document.activeElement !== sliderHdg) sliderHdg.value = String(Math.round(hdg));
+      if (valHdg) valHdg.textContent = `${Math.round(hdg)}°`;
+      if (sliderScale && document.activeElement !== sliderScale) sliderScale.value = scl.toFixed(2);
+      if (valScale) valScale.textContent = `${scl.toFixed(2)}×`;
+      if (sliderOff && document.activeElement !== sliderOff) sliderOff.value = off.toFixed(1);
+      if (valOff) valOff.textContent = `${off >= 0 ? '+' : ''}${off.toFixed(1)} m`;
+      if (splatCountEl) {
+        const cnt = active.assets.splat.splatCount;
+        splatCountEl.textContent =
+          typeof cnt === 'number' && cnt > 0 ? `${cnt.toLocaleString()} splats` : 'unloaded';
+      }
+    }
+
     // Dormant Before/After Compare Hook banner
     const compareBanner = el<HTMLDivElement>('survey-compare-banner');
     const compareText = el<HTMLSpanElement>('survey-compare-text');
@@ -5647,7 +6039,15 @@ let cameraPathRemove: (() => void) | null = null;
       const bmCount = isActive ? cameraBookmarks.length : item.bookmarks.length;
       const parts: string[] = [item.surveyId];
       if (tileCount > 0) parts.push(`${tileCount} ${tileCount === 1 ? 'tileset' : 'tilesets'}`);
-      if (item.assets.splat) parts.push('splat');
+      if (item.assets.splat) {
+        if (item.assets.splat.lastError) {
+          parts.push('splat error');
+        } else if (typeof item.assets.splat.splatCount === 'number' && item.assets.splat.splatCount > 0) {
+          parts.push(`${(item.assets.splat.splatCount / 1000).toFixed(0)}k splats`);
+        } else {
+          parts.push('splat');
+        }
+      }
       if (bmCount > 0) parts.push(`${bmCount} ${bmCount === 1 ? 'view' : 'views'}`);
       if (item.paths.length > 0) parts.push(`${item.paths.length} ${item.paths.length === 1 ? 'path' : 'paths'}`);
       metaLine.textContent = parts.join(' · ');
@@ -5785,9 +6185,17 @@ let cameraPathRemove: (() => void) | null = null;
       if (ionConnected) {
         for (const ts of tilesetsToLoad) {
           if (ts?.ionAssetId) {
-            await loadIonTileset(ts.ionAssetId, ts.name || `Asset #${ts.ionAssetId}`);
-            if (ts.visible === false) {
-              setTilesetVisibleById(ts.ionAssetId, false);
+            const loadRes = await loadIonTileset(ts.ionAssetId, ts.name || `Asset #${ts.ionAssetId}`);
+            if (loadRes.ok) {
+              if (ts.visible === false) {
+                setTilesetVisibleById(ts.ionAssetId, false);
+              }
+              // Honest status: promote to 'processed' only after the ion splat tileset is actually ready on the globe
+              if (target.assets.splat?.ionAssetId === ts.ionAssetId) {
+                markSurveySplatLoaded(target, { ionReady: true });
+              }
+            } else if (target.assets.splat?.ionAssetId === ts.ionAssetId) {
+              markSurveySplatLoadError(target, loadRes.error || `Failed to load Cesium ion asset #${ts.ionAssetId}.`);
             }
           }
         }
@@ -5797,6 +6205,13 @@ let cameraPathRemove: (() => void) | null = null;
           'info'
         );
       }
+    }
+
+    // Switch Three.js overlay Gaussian Splat: hide previous survey's overlay, show/load target's if URL/file-backed
+    if (target.assets.splat?.url) {
+      await activateSurveyOverlaySplat(target, { silent: options?.silent });
+    } else {
+      splatOverlay?.setActiveSurvey(null);
     }
 
     cameraBookmarks = target.bookmarks.map((b) => ({ ...b }));
@@ -5832,15 +6247,37 @@ let cameraPathRemove: (() => void) | null = null;
     const label = (input.label || '').trim() || `Survey ${capturedAt}`;
     const splat = parseSplatReferenceInput(input.splatInput || '', label);
 
+    const geoAnchor = geoBox
+      ? (() => {
+          const m = computeGeoBoxMetrics(geoBox);
+          return {
+            lat: m.centerLat,
+            lon: m.centerLon,
+            baseHeightMeters: m.baseEllipsoidalMeters,
+          };
+        })()
+      : null;
+
+    // Honest status rule: creating a survey with a splat ref must NEVER set 'processed'.
+    // Keep it 'captured' (if a splat/capture exists) or 'planned' until the splat actually loads.
+    const requestedStatus = input.status ? normalizeSurveyStatus(input.status) : undefined;
+    const honestInitialStatus: SurveyStatus =
+      requestedStatus && requestedStatus !== 'processed'
+        ? requestedStatus
+        : splat
+          ? 'captured'
+          : 'planned';
+
     const record = createDefaultSurveyRecord({
       capturedAt,
       label,
-      status: input.status ? normalizeSurveyStatus(input.status) : splat ? 'processed' : 'planned',
+      status: honestInitialStatus,
       verticalOffsetMeters: currentHeightOffset,
       clippingGeoJsonAssetId: activeClipAssetId,
       bookmarks: input.cloneBookmarks !== false ? prevActive.bookmarks : [],
       splatUrl: splat?.url ?? null,
       splatAssetId: splat?.ionAssetId ?? null,
+      splatAnchor: geoAnchor,
       existingIds: surveyCatalog.map((s) => s.surveyId),
     });
 
@@ -5859,6 +6296,7 @@ let cameraPathRemove: (() => void) | null = null;
     }
     const target = surveyCatalog.find((s) => s.surveyId === surveyId);
     if (!target) return;
+    splatOverlay?.removeSurveySplat(surveyId);
     surveyCatalog = surveyCatalog.filter((s) => s.surveyId !== surveyId);
     if (compareSurveyId === surveyId) {
       compareSurveyId = null;
@@ -6719,6 +7157,7 @@ let cameraPathRemove: (() => void) | null = null;
       active.capturedAt = toIsoDateOnly(val);
       active.surveyId = createSurveyId(active.capturedAt, active.label, otherIds);
       active.provenance.updatedAt = new Date().toISOString();
+      splatOverlay?.renameSurveyId(prevId, active.surveyId);
       activeSurveyId = active.surveyId;
       if (compareSurveyId === prevId) compareSurveyId = null;
       surveyCatalogTouched = true;
@@ -6730,9 +7169,11 @@ let cameraPathRemove: (() => void) | null = null;
       if (!val) return;
       const active = getActiveSurvey();
       const otherIds = surveyCatalog.filter((s) => s.surveyId !== active.surveyId).map((s) => s.surveyId);
+      const prevId = active.surveyId;
       active.label = val;
       active.surveyId = createSurveyId(active.capturedAt, active.label, otherIds);
       active.provenance.updatedAt = new Date().toISOString();
+      splatOverlay?.renameSurveyId(prevId, active.surveyId);
       activeSurveyId = active.surveyId;
       surveyCatalogTouched = true;
       syncSurveyUrlParams(true);
@@ -6746,16 +7187,125 @@ let cameraPathRemove: (() => void) | null = null;
       surveyCatalogTouched = true;
       renderSurveyCatalogUI();
     });
-    el<HTMLInputElement>('input-active-survey-splat')?.addEventListener('change', (e) => {
+    el<HTMLInputElement>('input-active-survey-splat')?.addEventListener('change', async (e) => {
       const val = (e.target as HTMLInputElement).value;
       const active = getActiveSurvey();
-      active.assets.splat = parseSplatReferenceInput(val, active.label);
-      if (active.assets.splat && active.status === 'planned') {
-        active.status = 'processed';
-      }
-      active.provenance.updatedAt = new Date().toISOString();
+      const parsed = parseSplatReferenceInput(val, active.label, active.assets.splat);
+
+      // Honest status: editing a splat ref NEVER sets 'processed' on its own.
+      applySurveySplatRef(active, parsed);
       surveyCatalogTouched = true;
       renderSurveyCatalogUI();
+
+      if (!parsed) {
+        splatOverlay?.removeSurveySplat(active.surveyId);
+        renderSurveyCatalogUI();
+        return;
+      }
+
+      if (parsed.ionAssetId) {
+        splatOverlay?.setActiveSurvey(null);
+        if (ionConnected) {
+          const loadRes = await loadIonTileset(parsed.ionAssetId, parsed.name || `Asset #${parsed.ionAssetId}`);
+          if (loadRes.ok) {
+            markSurveySplatLoaded(active, { ionReady: true });
+          } else {
+            markSurveySplatLoadError(
+              active,
+              loadRes.error || `Failed to load Cesium ion asset #${parsed.ionAssetId}.`
+            );
+          }
+          renderSurveyCatalogUI();
+        } else {
+          const msg = `Connect your Cesium ion Token to load asset #${parsed.ionAssetId}.`;
+          markSurveySplatLoadError(active, msg);
+          showToast(msg, 'info');
+          renderSurveyCatalogUI();
+        }
+      } else if (parsed.url) {
+        await activateSurveyOverlaySplat(active, { forceReload: true });
+      }
+    });
+
+    // Per-splat placement nudge sliders (heading / scale / vertical offset) + re-anchor button
+    const handleSplatNudgeChange = () => {
+      const active = getActiveSurvey();
+      if (!active.assets.splat) return;
+      const headingDeg = Number(el<HTMLInputElement>('slider-splat-heading')?.value ?? 0);
+      const scale = Number(el<HTMLInputElement>('slider-splat-scale')?.value ?? 1);
+      const offsetMeters = Number(el<HTMLInputElement>('slider-splat-offset')?.value ?? 0);
+      active.assets.splat.headingDeg = Number.isFinite(headingDeg) ? headingDeg : 0;
+      active.assets.splat.scale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+      active.assets.splat.offsetMeters = Number.isFinite(offsetMeters) ? offsetMeters : 0;
+
+      const valHdg = el<HTMLSpanElement>('val-splat-heading');
+      const valScale = el<HTMLSpanElement>('val-splat-scale');
+      const valOff = el<HTMLSpanElement>('val-splat-offset');
+      if (valHdg) valHdg.textContent = `${Math.round(active.assets.splat.headingDeg)}°`;
+      if (valScale) valScale.textContent = `${active.assets.splat.scale.toFixed(2)}×`;
+      if (valOff) {
+        valOff.textContent = `${active.assets.splat.offsetMeters >= 0 ? '+' : ''}${active.assets.splat.offsetMeters.toFixed(1)} m`;
+      }
+
+      splatOverlay?.updatePlacement(active.surveyId, {
+        headingDeg: active.assets.splat.headingDeg,
+        scale: active.assets.splat.scale,
+        offsetMeters: active.assets.splat.offsetMeters,
+      });
+    };
+    el<HTMLInputElement>('slider-splat-heading')?.addEventListener('input', handleSplatNudgeChange);
+    el<HTMLInputElement>('slider-splat-scale')?.addEventListener('input', handleSplatNudgeChange);
+    el<HTMLInputElement>('slider-splat-offset')?.addEventListener('input', handleSplatNudgeChange);
+    el<HTMLButtonElement>('btn-splat-reanchor')?.addEventListener('click', () => {
+      const active = getActiveSurvey();
+      if (!active.assets.splat) return;
+      const nextAnchor = resolveAnchorForSurvey(active, true);
+      active.assets.splat.anchor = nextAnchor;
+      splatOverlay?.updatePlacement(active.surveyId, { anchor: nextAnchor });
+      renderSurveyCatalogUI();
+      showToast(
+        `Re-anchored splat to ${nextAnchor.lat.toFixed(5)}°, ${nextAnchor.lon.toFixed(5)}° (${nextAnchor.baseHeightMeters.toFixed(1)} m)`
+      );
+    });
+
+    // Drag-and-drop .spz / .ply / .splat / .ksplat onto the globe to attach to the active survey
+    const splatDropOverlay = el<HTMLDivElement>('splat-drop-overlay');
+    let splatDragDepth = 0;
+    const isFileDrag = (evt: DragEvent): boolean =>
+      Boolean(evt.dataTransfer && Array.from(evt.dataTransfer.types || []).includes('Files'));
+
+    document.addEventListener('dragenter', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      splatDragDepth += 1;
+      splatDropOverlay?.classList.remove('hidden');
+    });
+    document.addEventListener('dragover', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    document.addEventListener('dragleave', (e) => {
+      if (!isFileDrag(e)) return;
+      splatDragDepth = Math.max(0, splatDragDepth - 1);
+      if (splatDragDepth === 0) {
+        splatDropOverlay?.classList.add('hidden');
+      }
+    });
+    document.addEventListener('drop', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      splatDragDepth = 0;
+      splatDropOverlay?.classList.add('hidden');
+      const files = Array.from(e.dataTransfer?.files || []);
+      const splatFile = files.find((f) => isSupportedSplatFileName(f.name));
+      if (!splatFile) {
+        if (files.length > 0) {
+          showToast('Unsupported drop file. Drop a .spz, .ply, .splat, or .ksplat splat file.', 'error');
+        }
+        return;
+      }
+      void attachDroppedSplatFile(splatFile);
     });
 
     el<HTMLButtonElement>('btn-load-manifest')?.addEventListener('click', () => {
@@ -6798,18 +7348,25 @@ let cameraPathRemove: (() => void) | null = null;
     el<HTMLButtonElement>('btn-measure-clear')?.addEventListener('click', clearMeasurements);
 
     // Geo-Coordinate Draw Box Controls
+    el<HTMLButtonElement>('btn-box-shape-mode')?.addEventListener('click', () => {
+      if (!geoBox) return;
+      setActiveCard(null);
+      showToast('Shaping mode — drag corners or ↕ TOP/BASE on the 3D globe');
+    });
     el<HTMLButtonElement>('btn-box-draw')?.addEventListener('click', () => {
       setGeoBoxDrawing(!geoBoxDrawing);
     });
     el<HTMLButtonElement>('btn-box-cancel-draw')?.addEventListener('click', () => {
       setGeoBoxDrawing(false);
-      setActiveCard('box');
+      if (!geoBox) setActiveCard('box');
     });
     el<HTMLButtonElement>('btn-box-from-view')?.addEventListener('click', () => {
-      dropGeoBoxAtView();
+      const snap = dropGeoBoxAtView();
+      if (snap) setActiveCard(null);
     });
     el<HTMLButtonElement>('btn-box-frame')?.addEventListener('click', () => {
       frameGeoBox();
+      if (geoBox) setActiveCard(null);
     });
     el<HTMLButtonElement>('btn-box-clear')?.addEventListener('click', () => {
       clearGeoBox();
@@ -6818,6 +7375,23 @@ let cameraPathRemove: (() => void) | null = null;
       if (!geoBox) return;
       geoBox.visible = !geoBox.visible;
       refreshGeoBoxGraphics();
+    });
+
+    // Slim unobstructed Geo-Box shaping bar actions
+    el<HTMLButtonElement>('btn-box-strip-frame')?.addEventListener('click', () => {
+      frameGeoBox();
+    });
+    el<HTMLButtonElement>('btn-box-strip-redraw')?.addEventListener('click', () => {
+      setGeoBoxDrawing(true);
+    });
+    el<HTMLButtonElement>('btn-box-strip-panel')?.addEventListener('click', () => {
+      setActiveCard('box');
+    });
+    el<HTMLButtonElement>('btn-box-strip-capture')?.addEventListener('click', () => {
+      void captureGeoBoxStudioBundle();
+    });
+    el<HTMLButtonElement>('btn-box-strip-clear')?.addEventListener('click', () => {
+      clearGeoBox();
     });
 
     el<HTMLInputElement>('input-box-name')?.addEventListener('input', (e) => {
@@ -7094,6 +7668,10 @@ let cameraPathRemove: (() => void) | null = null;
     'input-active-survey-label': 'site',
     'select-active-survey-status': 'site',
     'input-active-survey-splat': 'site',
+    'slider-splat-heading': 'site',
+    'slider-splat-scale': 'site',
+    'slider-splat-offset': 'site',
+    'btn-splat-reanchor': 'site',
     'input-site-title': 'site',
     'input-source-crs': 'site',
     'btn-load-manifest': 'site',
@@ -7239,6 +7817,7 @@ let cameraPathRemove: (() => void) | null = null;
     });
 
     updateRailActiveButtons();
+    syncBoxShapeBarVisibility();
     notifyUiStateChanged();
   }
 
@@ -7270,6 +7849,7 @@ let cameraPathRemove: (() => void) | null = null;
     }
 
     updateRailActiveButtons();
+    syncBoxShapeBarVisibility();
     notifyUiStateChanged();
   }
 
@@ -7308,6 +7888,7 @@ let cameraPathRemove: (() => void) | null = null;
       dockEl?.setAttribute('data-tucked', 'true');
       recallBtn?.setAttribute('data-tucked', 'false');
       recallBtn?.setAttribute('aria-hidden', 'false');
+      syncBoxShapeBarVisibility();
       notifyUiStateChanged();
     } else {
       hudMode = 'rail';
@@ -7855,7 +8436,7 @@ let cameraPathRemove: (() => void) | null = null;
             frame: args.frame !== false,
           });
           if (!snap) return { ok: false, error: 'Could not determine 3D surface coordinates for Geo-Box.' };
-          setActiveCard('box');
+          setActiveCard(null);
           return { ok: true, geoBox: snap };
         }
 
