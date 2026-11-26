@@ -1,12 +1,19 @@
-export const TRAINING_MODE_SSE = 2;
+export const TRAINING_MODE_SSE = 4;
+export const TRAINING_MODE_SSE_OPTIONS = [2, 4, 8] as const;
+export type TrainingModeSSE = (typeof TRAINING_MODE_SSE_OPTIONS)[number];
+
 export const CAPTURE_SETTLE_TIMEOUT_MS = 60000;
+export const CAPTURE_NETWORK_IDLE_MS = 3000;
 export const TRAINING_MODE_SETTLE_TIMEOUT_MS = CAPTURE_SETTLE_TIMEOUT_MS;
 export const DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS = CAPTURE_SETTLE_TIMEOUT_MS;
+
+export type SettleReason = 'tilesLoaded' | 'idle' | 'timeout';
 
 export interface CaptureSettleResult {
   timedOut: boolean;
   waitMs: number;
   cancelled: boolean;
+  settledBy: SettleReason;
 }
 
 export interface CaptureSettleWithRetryResult extends CaptureSettleResult {
@@ -14,19 +21,236 @@ export interface CaptureSettleWithRetryResult extends CaptureSettleResult {
   attempts: number;
 }
 
+export function parseTrainingModeSSE(raw: string | number | null | undefined): TrainingModeSSE {
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (n === 2 || n === 4 || n === 8) return n;
+  return TRAINING_MODE_SSE;
+}
+
 /**
  * Returns the maximum per-frame/per-view settle timeout (60 s) for all capture modes
  * (Capture Bundle Training ON/OFF, Render Path, and snapshots). Frames that settle
- * faster still resolve immediately once tiles finish loading.
+ * faster still resolve immediately once tiles finish loading or network goes idle.
  */
 export function getCaptureSettleTimeoutMs(_trainingMode?: boolean): number {
   return CAPTURE_SETTLE_TIMEOUT_MS;
 }
 
 /**
- * Places the camera and waits for tiles to settle up to the 60 s maximum timeout.
- * Frames that settle quickly resolve immediately. If the first attempt times out,
- * re-runs `placeCamera` and waits once more.
+ * Waits for a scene frame to settle using the unified rule across ALL captures:
+ * - Settled by `'tilesLoaded'` when `areTilesLoaded()` passes 2 frames in a row.
+ * - Settled by `'idle'` when no tile has started or finished loading for `idleMs` (default 3 s).
+ * - Hard ceiling `'timeout'` at `timeoutMs` (default 60 s).
+ */
+export function waitForSceneSettle(options: {
+  timeoutMs?: number;
+  idleMs?: number;
+  now?: () => number;
+  scheduleNextFrame?: (cb: () => void) => void;
+  renderFrame?: () => void;
+  areTilesLoaded: () => boolean;
+  isCancelled?: () => boolean;
+  getTilesets?: () => any[];
+  globe?: any;
+}): Promise<CaptureSettleResult> {
+  const timeoutMs = options.timeoutMs ?? CAPTURE_SETTLE_TIMEOUT_MS;
+  const idleMs = options.idleMs ?? CAPTURE_NETWORK_IDLE_MS;
+  const now = options.now ?? (() => performance.now());
+  const scheduleNextFrame =
+    options.scheduleNextFrame ?? ((cb: () => void) => window.requestAnimationFrame(cb));
+
+  return new Promise((resolve) => {
+    const startMs = now();
+    let lastActivityMs = startMs;
+    let consecutiveReady = 0;
+    let finished = false;
+    const removers: Array<() => void> = [];
+
+    const markActivity = () => {
+      lastActivityMs = now();
+    };
+
+    const tilesetTrackers = new Map<
+      any,
+      {
+        pending: number | null;
+        processing: number | null;
+        loadedTotal: number | null;
+      }
+    >();
+
+    const attachTileset = (ts: any) => {
+      if (!ts || tilesetTrackers.has(ts)) return;
+      const stats = ts.statistics;
+      const tracker = {
+        pending: typeof stats?.numberOfPendingRequests === 'number' ? stats.numberOfPendingRequests : null,
+        processing:
+          typeof stats?.numberOfTilesProcessing === 'number' ? stats.numberOfTilesProcessing : null,
+        loadedTotal:
+          typeof stats?.numberOfLoadedTilesTotal === 'number' ? stats.numberOfLoadedTilesTotal : null,
+      };
+      tilesetTrackers.set(ts, tracker);
+
+      if (ts.tileLoad && typeof ts.tileLoad.addEventListener === 'function') {
+        const remove = ts.tileLoad.addEventListener(() => {
+          markActivity();
+        });
+        if (typeof remove === 'function') removers.push(remove);
+      }
+      if (ts.tileFailed && typeof ts.tileFailed.addEventListener === 'function') {
+        const remove = ts.tileFailed.addEventListener(() => {
+          markActivity();
+        });
+        if (typeof remove === 'function') removers.push(remove);
+      }
+      if (ts.loadProgress && typeof ts.loadProgress.addEventListener === 'function') {
+        const remove = ts.loadProgress.addEventListener((pending: number, processing: number) => {
+          if (pending !== tracker.pending || processing !== tracker.processing) {
+            tracker.pending = pending;
+            tracker.processing = processing;
+            markActivity();
+          }
+        });
+        if (typeof remove === 'function') removers.push(remove);
+      }
+    };
+
+    const syncTilesetsAndPollStats = () => {
+      const list = options.getTilesets?.() ?? [];
+      for (const ts of list) {
+        if (!ts || ts.show === false) continue;
+        attachTileset(ts);
+        const tracker = tilesetTrackers.get(ts);
+        const stats = ts.statistics;
+        if (tracker && stats) {
+          const p =
+            typeof stats.numberOfPendingRequests === 'number'
+              ? stats.numberOfPendingRequests
+              : tracker.pending;
+          const proc =
+            typeof stats.numberOfTilesProcessing === 'number'
+              ? stats.numberOfTilesProcessing
+              : tracker.processing;
+          const loaded =
+            typeof stats.numberOfLoadedTilesTotal === 'number'
+              ? stats.numberOfLoadedTilesTotal
+              : tracker.loadedTotal;
+          if (p !== tracker.pending || proc !== tracker.processing || loaded !== tracker.loadedTotal) {
+            tracker.pending = p;
+            tracker.processing = proc;
+            tracker.loadedTotal = loaded;
+            markActivity();
+          }
+        }
+      }
+    };
+
+    // Attach initial tileset listeners and globe tileLoadProgressEvent listener
+    syncTilesetsAndPollStats();
+
+    let lastGlobeQueued: number | null = null;
+    const globe = options.globe;
+    if (
+      globe &&
+      globe.show !== false &&
+      globe.tileLoadProgressEvent &&
+      typeof globe.tileLoadProgressEvent.addEventListener === 'function'
+    ) {
+      const remove = globe.tileLoadProgressEvent.addEventListener((queuedCount: number) => {
+        if (queuedCount !== lastGlobeQueued) {
+          lastGlobeQueued = queuedCount;
+          markActivity();
+        }
+      });
+      if (typeof remove === 'function') removers.push(remove);
+    }
+
+    const finish = (result: CaptureSettleResult) => {
+      if (finished) return;
+      finished = true;
+      for (const remove of removers) {
+        try {
+          remove();
+        } catch {
+          // ignore cleanup error
+        }
+      }
+      removers.length = 0;
+      resolve(result);
+    };
+
+    const step = () => {
+      if (finished) return;
+      const currentMs = now();
+      if (options.isCancelled?.()) {
+        finish({
+          timedOut: false,
+          waitMs: Math.max(0, Math.round(currentMs - startMs)),
+          cancelled: true,
+          settledBy: 'timeout',
+        });
+        return;
+      }
+
+      try {
+        options.renderFrame?.();
+      } catch {
+        // ignore transient render warning and retry next rAF
+      }
+
+      syncTilesetsAndPollStats();
+
+      if (options.areTilesLoaded()) {
+        consecutiveReady += 1;
+      } else {
+        consecutiveReady = 0;
+      }
+
+      const afterRenderMs = now();
+      const elapsed = Math.max(0, afterRenderMs - startMs);
+      const idleElapsed = Math.max(0, afterRenderMs - lastActivityMs);
+
+      if (consecutiveReady >= 2) {
+        finish({
+          timedOut: false,
+          waitMs: Math.round(elapsed),
+          cancelled: false,
+          settledBy: 'tilesLoaded',
+        });
+        return;
+      }
+
+      if (idleElapsed >= idleMs) {
+        finish({
+          timedOut: false,
+          waitMs: Math.round(elapsed),
+          cancelled: false,
+          settledBy: 'idle',
+        });
+        return;
+      }
+
+      if (elapsed >= timeoutMs) {
+        finish({
+          timedOut: true,
+          waitMs: Math.round(elapsed),
+          cancelled: false,
+          settledBy: 'timeout',
+        });
+        return;
+      }
+
+      scheduleNextFrame(step);
+    };
+
+    scheduleNextFrame(step);
+  });
+}
+
+/**
+ * Places the camera and waits for tiles to settle up to the 60 s maximum timeout
+ * (settling early on 2x `tilesLoaded` or 3 s network idle). If the first attempt
+ * times out, re-runs `placeCamera` and waits once more.
  */
 export async function settleViewWithRetry(options: {
   trainingMode?: boolean;
@@ -43,6 +267,7 @@ export async function settleViewWithRetry(options: {
       timedOut: false,
       waitMs: first.waitMs,
       cancelled: true,
+      settledBy: first.settledBy,
       retried: false,
       attempts: 1,
     };
@@ -52,6 +277,7 @@ export async function settleViewWithRetry(options: {
       timedOut: false,
       waitMs: first.waitMs,
       cancelled: false,
+      settledBy: first.settledBy,
       retried: false,
       attempts: 1,
     };
@@ -65,6 +291,7 @@ export async function settleViewWithRetry(options: {
     timedOut: !cancelled && second.timedOut,
     waitMs: first.waitMs + second.waitMs,
     cancelled,
+    settledBy: second.settledBy,
     retried: true,
     attempts: 2,
   };
@@ -92,6 +319,7 @@ export interface TrainingModeSceneSnapshot {
   globeEnableLighting: boolean | null;
   viewerShadows: boolean | null;
   shadowMapEnabled: boolean | null;
+  googleDynamicScreenSpaceError: { tileset: any; value: boolean } | null;
   tilesets: Array<{ tileset: any; maximumScreenSpaceError: number }>;
 }
 
@@ -102,6 +330,7 @@ export interface CaptureRenderSettingsDocument {
   resolution: [number, number];
   trainingMode: boolean;
   maximumScreenSpaceError: number;
+  dynamicScreenSpaceError: boolean;
   tilesetCount: number;
   toggles: {
     skyAtmosphere: boolean;
@@ -111,6 +340,7 @@ export interface CaptureRenderSettingsDocument {
     skyBox: boolean;
     globeEnableLighting: boolean;
     shadows: boolean;
+    dynamicScreenSpaceError: boolean;
     msaaSamples: number | null;
     splatOverlayComposited: boolean;
     attributionBar: boolean;
@@ -118,7 +348,7 @@ export interface CaptureRenderSettingsDocument {
   };
 }
 
-function collectUniqueTilesets(viewer: any, extraTilesets: any[] = []): any[] {
+export function collectUniqueTilesets(viewer: any, extraTilesets: any[] = []): any[] {
   const seen = new Set<any>();
   const addIfTileset = (candidate: any) => {
     if (!candidate || seen.has(candidate)) return;
@@ -148,14 +378,21 @@ function collectUniqueTilesets(viewer: any, extraTilesets: any[] = []): any[] {
 /**
  * Applies deterministic training-mode scene overrides for Capture Bundle:
  * turns off skyAtmosphere, fog, sun, moon, skyBox, globe.enableLighting, and shadows;
- * keeps MSAA untouched; sets Google 3D and all loaded tilesets' maximumScreenSpaceError to 2.
+ * keeps MSAA untouched; sets Google 3D and all loaded tilesets' maximumScreenSpaceError
+ * to `maximumScreenSpaceError` (default 4); enables `dynamicScreenSpaceError` on the
+ * Google 3D tileset so distant horizon tiles stay lower detail while the Geo-Box stays sharp.
  * Returns a snapshot used to restore every single setting in a `finally` block.
  */
 export function applyTrainingModeSceneSettings(
   viewer: any,
-  extraTilesets: any[] = []
+  extraTilesets: any[] = [],
+  options?: {
+    maximumScreenSpaceError?: number;
+    google3DTileset?: any;
+  }
 ): TrainingModeSceneSnapshot {
   const scene = viewer?.scene;
+  const targetSSE = parseTrainingModeSSE(options?.maximumScreenSpaceError ?? TRAINING_MODE_SSE);
   const snapshot: TrainingModeSceneSnapshot = {
     skyAtmosphereShow: null,
     fogEnabled: null,
@@ -165,6 +402,7 @@ export function applyTrainingModeSceneSettings(
     globeEnableLighting: null,
     viewerShadows: null,
     shadowMapEnabled: null,
+    googleDynamicScreenSpaceError: null,
     tilesets: [],
   };
 
@@ -201,21 +439,31 @@ export function applyTrainingModeSceneSettings(
     scene.shadowMap.enabled = false;
   }
 
-  const tilesets = collectUniqueTilesets(viewer, extraTilesets);
+  const googleTs = options?.google3DTileset ?? null;
+  if (googleTs && typeof googleTs === 'object') {
+    snapshot.googleDynamicScreenSpaceError = {
+      tileset: googleTs,
+      value: Boolean(googleTs.dynamicScreenSpaceError),
+    };
+    googleTs.dynamicScreenSpaceError = true;
+  }
+
+  const allExtra = googleTs ? [googleTs, ...extraTilesets] : extraTilesets;
+  const tilesets = collectUniqueTilesets(viewer, allExtra);
   for (const tileset of tilesets) {
     snapshot.tilesets.push({
       tileset,
       maximumScreenSpaceError: tileset.maximumScreenSpaceError,
     });
-    tileset.maximumScreenSpaceError = TRAINING_MODE_SSE;
+    tileset.maximumScreenSpaceError = targetSSE;
   }
 
   return snapshot;
 }
 
 /**
- * Restores every scene toggle and tileset maximumScreenSpaceError saved by
- * `applyTrainingModeSceneSettings`. Never modifies MSAA.
+ * Restores every scene toggle, Google 3D `dynamicScreenSpaceError`, and tileset
+ * `maximumScreenSpaceError` saved by `applyTrainingModeSceneSettings`. Never modifies MSAA.
  */
 export function restoreTrainingModeSceneSettings(
   viewer: any,
@@ -248,6 +496,10 @@ export function restoreTrainingModeSceneSettings(
   if (snapshot.shadowMapEnabled !== null && scene?.shadowMap) {
     scene.shadowMap.enabled = snapshot.shadowMapEnabled;
   }
+  if (snapshot.googleDynamicScreenSpaceError?.tileset) {
+    snapshot.googleDynamicScreenSpaceError.tileset.dynamicScreenSpaceError =
+      snapshot.googleDynamicScreenSpaceError.value;
+  }
 
   for (const entry of snapshot.tilesets) {
     if (entry.tileset && typeof entry.tileset.maximumScreenSpaceError === 'number') {
@@ -262,12 +514,19 @@ export function buildCaptureRenderSettingsJson(options: {
   resolution: [number, number];
   trainingMode: boolean;
   currentSSE: number;
+  trainingSSE?: number;
+  google3DTileset?: any;
   extraTilesets?: any[];
   date?: string;
 }): CaptureRenderSettingsDocument {
   const scene = options.viewer?.scene;
-  const tilesets = collectUniqueTilesets(options.viewer, options.extraTilesets ?? []);
+  const extra = options.google3DTileset
+    ? [options.google3DTileset, ...(options.extraTilesets ?? [])]
+    : (options.extraTilesets ?? []);
+  const tilesets = collectUniqueTilesets(options.viewer, extra);
   const msaaSamples = typeof scene?.msaaSamples === 'number' ? scene.msaaSamples : null;
+  const effectiveTrainingSSE = parseTrainingModeSSE(options.trainingSSE ?? TRAINING_MODE_SSE);
+  const dynamicSSE = Boolean(options.google3DTileset?.dynamicScreenSpaceError);
 
   return {
     schema: 'nodrone-render-settings/1.0',
@@ -275,7 +534,8 @@ export function buildCaptureRenderSettingsJson(options: {
     cesiumVersion: options.cesiumVersion || 'unknown',
     resolution: [options.resolution[0], options.resolution[1]],
     trainingMode: options.trainingMode,
-    maximumScreenSpaceError: options.trainingMode ? TRAINING_MODE_SSE : options.currentSSE,
+    maximumScreenSpaceError: options.trainingMode ? effectiveTrainingSSE : options.currentSSE,
+    dynamicScreenSpaceError: dynamicSSE,
     tilesetCount: tilesets.length,
     toggles: {
       skyAtmosphere: Boolean(scene?.skyAtmosphere?.show),
@@ -285,6 +545,7 @@ export function buildCaptureRenderSettingsJson(options: {
       skyBox: Boolean(scene?.skyBox?.show),
       globeEnableLighting: Boolean(scene?.globe?.enableLighting),
       shadows: Boolean(options.viewer?.shadows || scene?.shadowMap?.enabled),
+      dynamicScreenSpaceError: dynamicSSE,
       msaaSamples,
       splatOverlayComposited: !options.trainingMode,
       attributionBar: true,

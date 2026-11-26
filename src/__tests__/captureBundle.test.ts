@@ -2,14 +2,19 @@ import { describe, expect, it } from 'vitest';
 import {
   applyTrainingModeSceneSettings,
   buildCaptureRenderSettingsJson,
+  CAPTURE_NETWORK_IDLE_MS,
   CAPTURE_SETTLE_TIMEOUT_MS,
   DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS,
   formatTimeoutWarningToast,
   getCaptureSettleTimeoutMs,
+  parseTrainingModeSSE,
   restoreTrainingModeSceneSettings,
   settleViewWithRetry,
   TRAINING_MODE_SETTLE_TIMEOUT_MS,
   TRAINING_MODE_SSE,
+  TRAINING_MODE_SSE_OPTIONS,
+  waitForSceneSettle,
+  type SettleReason,
 } from '../captureBundleTraining';
 import {
   buildLookAtC2W,
@@ -58,6 +63,24 @@ function buildSyntheticTrainerPoses(
       K,
     };
   });
+}
+
+function createFakeEvent<T extends any[] = []>() {
+  const listeners = new Set<(...args: T) => void>();
+  return {
+    addEventListener(fn: (...args: T) => void) {
+      listeners.add(fn);
+      return () => {
+        listeners.delete(fn);
+      };
+    },
+    raise(...args: T) {
+      for (const fn of listeners) fn(...args);
+    },
+    get listenerCount() {
+      return listeners.size;
+    },
+  };
 }
 
 describe('Capture Bundle held-out views', () => {
@@ -130,7 +153,6 @@ describe('Capture Bundle held-out views', () => {
       .filter((line) => line.trim() !== '' && !line.startsWith('#'));
     expect(colmapImageLines).toHaveLength(72);
 
-    // Held-out transforms reference heldout-local view filenames
     expect(heldOutTransforms.frames[0].file_path).toBe('view_001.png');
     expect(heldOutTransforms.frames[19].file_path).toBe('view_020.png');
   });
@@ -156,7 +178,6 @@ describe('Capture Bundle intrinsics match effective Render Path resolution', () 
       const poses = buildSyntheticTrainerPoses(trainingAngles, res, 'frames/', 39.6);
       const expectedK = computePinholeK(res[0], res[1], 39.6);
 
-      // camera_matrices.json intrinsics
       expect(poses[0].K.width).toBe(c.expected[0]);
       expect(poses[0].K.height).toBe(c.expected[1]);
       expect(poses[0].K.cx).toBeCloseTo(c.expected[0] / 2, 6);
@@ -164,7 +185,6 @@ describe('Capture Bundle intrinsics match effective Render Path resolution', () 
       expect(poses[0].K.fx).toBeCloseTo(expectedK.fx, 6);
       expect(poses[0].K.fy).toBeCloseTo(expectedK.fy, 6);
 
-      // transforms.json intrinsics
       const transforms = buildNerfstudioTransformsJson(poses, {
         siteName: 'Wanek Center',
         anchor,
@@ -176,7 +196,6 @@ describe('Capture Bundle intrinsics match effective Render Path resolution', () 
       expect(transforms.fl_x).toBeCloseTo(expectedK.fx, 5);
       expect(transforms.fl_y).toBeCloseTo(expectedK.fy, 5);
 
-      // COLMAP sparse/0/cameras.txt intrinsics
       const colmap = buildColmapSparseTextFiles(poses, {
         widthMeters: 100,
         depthMeters: 80,
@@ -197,10 +216,28 @@ describe('Capture Bundle intrinsics match effective Render Path resolution', () 
   });
 });
 
-describe('Capture Bundle Training mode toggles and render_settings.json', () => {
-  it('applies Training mode toggles, leaves MSAA untouched, writes render_settings.json, and restores everything cleanly', () => {
-    const googleTileset = { name: 'Google 3D', maximumScreenSpaceError: 8 };
-    const siteTileset = { name: 'Wanek Site', maximumScreenSpaceError: 12 };
+describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpaceError, and render_settings.json', () => {
+  it('defaults Training mode SSE to 4 and supports 2 / 4 / 8 options', () => {
+    expect(TRAINING_MODE_SSE).toBe(4);
+    expect([...TRAINING_MODE_SSE_OPTIONS]).toEqual([2, 4, 8]);
+    expect(parseTrainingModeSSE('2')).toBe(2);
+    expect(parseTrainingModeSSE('4')).toBe(4);
+    expect(parseTrainingModeSSE('8')).toBe(8);
+    expect(parseTrainingModeSSE(undefined)).toBe(4);
+    expect(parseTrainingModeSSE('16')).toBe(4);
+  });
+
+  it('applies Training mode toggles, default SSE=4, enables Google 3D dynamicScreenSpaceError, leaves MSAA untouched, writes render_settings.json, and restores everything cleanly', () => {
+    const googleTileset = {
+      name: 'Google 3D',
+      maximumScreenSpaceError: 8,
+      dynamicScreenSpaceError: false,
+    };
+    const siteTileset = {
+      name: 'Wanek Site',
+      maximumScreenSpaceError: 12,
+      dynamicScreenSpaceError: false,
+    };
     const nonTilesetPrimitive = { name: 'PolylineCollection' };
 
     const viewer = {
@@ -223,7 +260,9 @@ describe('Capture Bundle Training mode toggles and render_settings.json', () => 
       },
     };
 
-    const snapshot = applyTrainingModeSceneSettings(viewer, [googleTileset]);
+    const snapshot = applyTrainingModeSceneSettings(viewer, [googleTileset], {
+      google3DTileset: googleTileset,
+    });
 
     // Every training-mode toggle is OFF during capture
     expect(viewer.scene.skyAtmosphere.show).toBe(false);
@@ -238,24 +277,29 @@ describe('Capture Bundle Training mode toggles and render_settings.json', () => 
     // MSAA untouched
     expect(viewer.scene.msaaSamples).toBe(4);
 
-    // Google 3D and all loaded tilesets set to SSE = 2
-    expect(googleTileset.maximumScreenSpaceError).toBe(TRAINING_MODE_SSE);
-    expect(siteTileset.maximumScreenSpaceError).toBe(TRAINING_MODE_SSE);
+    // Google 3D and all loaded tilesets set to default SSE = 4; dynamicScreenSpaceError enabled on Google 3D
+    expect(googleTileset.maximumScreenSpaceError).toBe(4);
+    expect(siteTileset.maximumScreenSpaceError).toBe(4);
+    expect(googleTileset.dynamicScreenSpaceError).toBe(true);
+    expect(siteTileset.dynamicScreenSpaceError).toBe(false);
 
-    // render_settings.json reflects active capture state accurately
+    // render_settings.json records SSE=4 and dynamicScreenSpaceError=true accurately
     const settingsDoc = buildCaptureRenderSettingsJson({
       viewer,
       cesiumVersion: '1.124',
       resolution: [1920, 1080],
       trainingMode: true,
       currentSSE: 8,
+      trainingSSE: 4,
+      google3DTileset: googleTileset,
       extraTilesets: [googleTileset],
       date: '2026-11-26T00:00:00.000Z',
     });
     expect(settingsDoc.cesiumVersion).toBe('1.124');
     expect(settingsDoc.resolution).toEqual([1920, 1080]);
     expect(settingsDoc.trainingMode).toBe(true);
-    expect(settingsDoc.maximumScreenSpaceError).toBe(2);
+    expect(settingsDoc.maximumScreenSpaceError).toBe(4);
+    expect(settingsDoc.dynamicScreenSpaceError).toBe(true);
     expect(settingsDoc.tilesetCount).toBe(2);
     expect(settingsDoc.date).toBe('2026-11-26T00:00:00.000Z');
     expect(settingsDoc.toggles).toEqual({
@@ -266,6 +310,7 @@ describe('Capture Bundle Training mode toggles and render_settings.json', () => 
       skyBox: false,
       globeEnableLighting: false,
       shadows: false,
+      dynamicScreenSpaceError: true,
       msaaSamples: 4,
       splatOverlayComposited: false,
       attributionBar: true,
@@ -285,13 +330,43 @@ describe('Capture Bundle Training mode toggles and render_settings.json', () => 
     expect(viewer.scene.shadowMap.enabled).toBe(true);
     expect(viewer.scene.msaaSamples).toBe(4);
     expect(googleTileset.maximumScreenSpaceError).toBe(8);
+    expect(googleTileset.dynamicScreenSpaceError).toBe(false);
     expect(siteTileset.maximumScreenSpaceError).toBe(12);
+  });
+
+  it('applies custom Training mode SSE=8 from dropdown and records it in render_settings.json', () => {
+    const googleTileset = { maximumScreenSpaceError: 16, dynamicScreenSpaceError: false };
+    const viewer = { scene: { msaaSamples: 4, primitives: [googleTileset] } };
+
+    const snap = applyTrainingModeSceneSettings(viewer, [googleTileset], {
+      maximumScreenSpaceError: 8,
+      google3DTileset: googleTileset,
+    });
+    expect(googleTileset.maximumScreenSpaceError).toBe(8);
+    expect(googleTileset.dynamicScreenSpaceError).toBe(true);
+
+    const doc = buildCaptureRenderSettingsJson({
+      viewer,
+      cesiumVersion: '1.124',
+      resolution: [1920, 1080],
+      trainingMode: true,
+      currentSSE: 16,
+      trainingSSE: 8,
+      google3DTileset: googleTileset,
+    });
+    expect(doc.maximumScreenSpaceError).toBe(8);
+    expect(doc.dynamicScreenSpaceError).toBe(true);
+
+    restoreTrainingModeSceneSettings(viewer, snap);
+    expect(googleTileset.maximumScreenSpaceError).toBe(16);
+    expect(googleTileset.dynamicScreenSpaceError).toBe(false);
   });
 });
 
-describe('Universal 60s settle timeout, single retry, timedOut tracking, and warning toasts', () => {
-  it('uses 60s max timeout for ALL capture modes (Training ON, Training OFF, Render Path, snapshots)', () => {
+describe('Universal settle rule (tilesLoaded 2x OR 3s network idle OR 60s hard ceiling + retry) & settledBy', () => {
+  it('uses 60s max timeout and 3s network idle threshold for ALL capture modes', () => {
     expect(CAPTURE_SETTLE_TIMEOUT_MS).toBe(60000);
+    expect(CAPTURE_NETWORK_IDLE_MS).toBe(3000);
     expect(TRAINING_MODE_SETTLE_TIMEOUT_MS).toBe(60000);
     expect(DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS).toBe(60000);
     expect(getCaptureSettleTimeoutMs(true)).toBe(60000);
@@ -299,38 +374,160 @@ describe('Universal 60s settle timeout, single retry, timedOut tracking, and war
     expect(getCaptureSettleTimeoutMs()).toBe(60000);
   });
 
-  it('saves fast-settling frames immediately without retrying and retries timed-out views once across Training ON, Training OFF, held-out, and Render Path', async () => {
+  it('settles immediately with settledBy="tilesLoaded" when tilesLoaded passes 2 consecutive frames', async () => {
+    let clockMs = 0;
+    let tick = 0;
+    const tileLoad = createFakeEvent();
+    const tileset = {
+      show: true,
+      tileLoad,
+      statistics: { numberOfPendingRequests: 0, numberOfTilesProcessing: 0, numberOfLoadedTilesTotal: 10 },
+    };
+
+    const result = await waitForSceneSettle({
+      now: () => clockMs,
+      scheduleNextFrame: (cb) => {
+        clockMs += 16;
+        queueMicrotask(cb);
+      },
+      renderFrame: () => {
+        tick += 1;
+      },
+      areTilesLoaded: () => tick >= 2, // frame 1 false, frames 2 & 3 true -> settles at frame 3
+      getTilesets: () => [tileset],
+    });
+
+    expect(result).toEqual({
+      timedOut: false,
+      waitMs: 48,
+      cancelled: false,
+      settledBy: 'tilesLoaded',
+    });
+    expect(tileLoad.listenerCount).toBe(0); // listeners cleaned up
+  });
+
+  it('settles with settledBy="idle" after 3 consecutive seconds with no tile starting or finishing loading, resetting timer on activity', async () => {
+    let clockMs = 0;
+    const tileLoad = createFakeEvent();
+    const loadProgress = createFakeEvent<[number, number]>();
+    const tileset = {
+      show: true,
+      tileLoad,
+      loadProgress,
+      statistics: { numberOfPendingRequests: 3, numberOfTilesProcessing: 0, numberOfLoadedTilesTotal: 20 },
+    };
+
+    const result = await waitForSceneSettle({
+      timeoutMs: 60000,
+      idleMs: 3000,
+      now: () => clockMs,
+      scheduleNextFrame: (cb) => {
+        clockMs += 500;
+        queueMicrotask(cb);
+      },
+      renderFrame: () => {
+        // Tile finishes loading at 1500ms, another starts at 2500ms -> idle timer resets to 2500ms.
+        // Repeated identical loadProgress(4, 0) at 4000ms does NOT reset the idle timer.
+        if (clockMs === 1500) {
+          tileset.statistics.numberOfLoadedTilesTotal = 21;
+          tileLoad.raise();
+        } else if (clockMs === 2500) {
+          tileset.statistics.numberOfPendingRequests = 4;
+          loadProgress.raise(4, 0);
+        } else if (clockMs === 4000) {
+          // Same counts (stalled request) -> no tile started or finished
+          loadProgress.raise(4, 0);
+        }
+      },
+      areTilesLoaded: () => false,
+      getTilesets: () => [tileset],
+    });
+
+    // Last real tile activity was at 2500ms, so 3000ms later = 5500ms
+    expect(result).toEqual({
+      timedOut: false,
+      waitMs: 5500,
+      cancelled: false,
+      settledBy: 'idle',
+    });
+    expect(tileLoad.listenerCount).toBe(0);
+    expect(loadProgress.listenerCount).toBe(0);
+  });
+
+  it('hits settledBy="timeout" at 60s when tiles keep loading continuously without ever idling for 3s', async () => {
+    let clockMs = 0;
+    const tileLoad = createFakeEvent();
+    const tileset = {
+      show: true,
+      tileLoad,
+      statistics: { numberOfPendingRequests: 2, numberOfTilesProcessing: 1, numberOfLoadedTilesTotal: 0 },
+    };
+
+    const result = await waitForSceneSettle({
+      timeoutMs: 60000,
+      idleMs: 3000,
+      now: () => clockMs,
+      scheduleNextFrame: (cb) => {
+        clockMs += 1000;
+        queueMicrotask(cb);
+      },
+      renderFrame: () => {
+        // Every 1s a tile finishes, so network never goes idle for 3s, and tilesLoaded stays false
+        tileset.statistics.numberOfLoadedTilesTotal += 1;
+        tileLoad.raise();
+      },
+      areTilesLoaded: () => false,
+      getTilesets: () => [tileset],
+    });
+
+    expect(result).toEqual({
+      timedOut: true,
+      waitMs: 60000,
+      cancelled: false,
+      settledBy: 'timeout',
+    });
+    expect(tileLoad.listenerCount).toBe(0);
+  });
+
+  it('does not retry on tilesLoaded or idle, retries once on timeout, and records accurate settledBy and timedOut lists', async () => {
     const viewFiles = [
-      'frames/view_001.png', // settles fast on first try (180ms)
-      'frames/view_002.png', // times out once, succeeds on retry
-      'frames/view_003.png', // times out twice -> kept & logged in timedOutViews
-      'heldout/view_001.png', // held-out view times out twice -> kept & logged in heldout_render-log.json
+      'frames/view_001.png', // settles via tilesLoaded
+      'frames/view_002.png', // settles via 3s network idle (no retry!)
+      'frames/view_003.png', // times out once, then settles via idle on retry
+      'frames/view_004.png', // times out twice -> kept & logged in timedOutViews with settledBy="timeout"
+      'heldout/view_001.png', // held-out settles via idle
     ];
 
-    const outcomesByView: Record<string, Array<{ timedOut: boolean; waitMs: number; cancelled: boolean }>> = {
-      'frames/view_001.png': [{ timedOut: false, waitMs: 180, cancelled: false }],
+    const outcomesByView: Record<
+      string,
+      Array<{ timedOut: boolean; waitMs: number; cancelled: boolean; settledBy: SettleReason }>
+    > = {
+      'frames/view_001.png': [
+        { timedOut: false, waitMs: 180, cancelled: false, settledBy: 'tilesLoaded' },
+      ],
       'frames/view_002.png': [
-        { timedOut: true, waitMs: 60000, cancelled: false },
-        { timedOut: false, waitMs: 8500, cancelled: false },
+        { timedOut: false, waitMs: 4500, cancelled: false, settledBy: 'idle' },
       ],
       'frames/view_003.png': [
-        { timedOut: true, waitMs: 60000, cancelled: false },
-        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: true, waitMs: 60000, cancelled: false, settledBy: 'timeout' },
+        { timedOut: false, waitMs: 7200, cancelled: false, settledBy: 'idle' },
+      ],
+      'frames/view_004.png': [
+        { timedOut: true, waitMs: 60000, cancelled: false, settledBy: 'timeout' },
+        { timedOut: true, waitMs: 60000, cancelled: false, settledBy: 'timeout' },
       ],
       'heldout/view_001.png': [
-        { timedOut: true, waitMs: 60000, cancelled: false },
-        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: false, waitMs: 3900, cancelled: false, settledBy: 'idle' },
       ],
     };
 
     const setViewCallsByView: Record<string, number> = {};
     const observedTimeouts: number[] = [];
-    const savedTrainingPngs: string[] = [];
+    const trainingSettledBy: SettleReason[] = [];
     const trainingTimedOutViews: string[] = [];
-    const savedHeldOutPngs: string[] = [];
+    const heldOutSettledBy: SettleReason[] = [];
     const heldOutTimedOutViews: string[] = [];
 
-    // Run with Training mode OFF to verify 60s + retry applies even when Training mode is OFF
     for (const fileName of viewFiles) {
       setViewCallsByView[fileName] = 0;
       let attemptIdx = 0;
@@ -342,105 +539,64 @@ describe('Universal 60s settle timeout, single retry, timedOut tracking, and war
         },
         waitForSettle: async (timeoutMs) => {
           observedTimeouts.push(timeoutMs);
-          const outcome = outcomesByView[fileName][attemptIdx];
-          attemptIdx += 1;
-          return outcome;
+          return outcomesByView[fileName][attemptIdx++];
         },
       });
 
-      const isHeldOut = fileName.startsWith('heldout/');
-      if (isHeldOut) {
-        savedHeldOutPngs.push(fileName);
+      if (fileName.startsWith('heldout/')) {
+        heldOutSettledBy.push(result.settledBy);
         if (result.timedOut) heldOutTimedOutViews.push(fileName);
       } else {
-        savedTrainingPngs.push(fileName);
+        trainingSettledBy.push(result.settledBy);
         if (result.timedOut) trainingTimedOutViews.push(fileName);
-      }
-
-      if (fileName === 'frames/view_001.png') {
-        expect(result).toEqual({
-          timedOut: false,
-          waitMs: 180,
-          cancelled: false,
-          retried: false,
-          attempts: 1,
-        });
-      } else if (fileName === 'frames/view_002.png') {
-        expect(result).toEqual({
-          timedOut: false,
-          waitMs: 68500,
-          cancelled: false,
-          retried: true,
-          attempts: 2,
-        });
-      } else {
-        expect(result).toEqual({
-          timedOut: true,
-          waitMs: 120000,
-          cancelled: false,
-          retried: true,
-          attempts: 2,
-        });
       }
     }
 
-    // Every wait call used 60s max even with Training mode OFF
     expect(observedTimeouts.every((ms) => ms === 60000)).toBe(true);
-
-    // setView re-ran exactly once for each initially timed-out view, never for fast-settling view_001
     expect(setViewCallsByView).toEqual({
       'frames/view_001.png': 1,
-      'frames/view_002.png': 2,
+      'frames/view_002.png': 1,
       'frames/view_003.png': 2,
-      'heldout/view_001.png': 2,
+      'frames/view_004.png': 2,
+      'heldout/view_001.png': 1,
     });
-
-    // All PNGs are kept, and only views that timed out again after retry are listed in timedOutViews
-    expect(savedTrainingPngs).toEqual([
-      'frames/view_001.png',
-      'frames/view_002.png',
-      'frames/view_003.png',
-    ]);
-    expect(trainingTimedOutViews).toEqual(['frames/view_003.png']);
-    expect(savedHeldOutPngs).toEqual(['heldout/view_001.png']);
-    expect(heldOutTimedOutViews).toEqual(['heldout/view_001.png']);
+    expect(trainingSettledBy).toEqual(['tilesLoaded', 'idle', 'idle', 'timeout']);
+    expect(trainingTimedOutViews).toEqual(['frames/view_004.png']);
+    expect(heldOutSettledBy).toEqual(['idle']);
+    expect(heldOutTimedOutViews).toEqual([]);
   });
 
-  it('tracks Render Path timedOutFrames with 60s timeout + single retry and omits frames recovered on retry', async () => {
+  it('tracks Render Path timedOutFrames and settledBy with 60s timeout + single retry', async () => {
     const frames = ['frame_00001.jpg', 'frame_00002.jpg', 'frame_00003.jpg'];
-    const outcomes: Record<string, Array<{ timedOut: boolean; waitMs: number; cancelled: boolean }>> = {
-      'frame_00001.jpg': [{ timedOut: false, waitMs: 95, cancelled: false }],
+    const outcomes: Record<
+      string,
+      Array<{ timedOut: boolean; waitMs: number; cancelled: boolean; settledBy: SettleReason }>
+    > = {
+      'frame_00001.jpg': [{ timedOut: false, waitMs: 95, cancelled: false, settledBy: 'tilesLoaded' }],
       'frame_00002.jpg': [
-        { timedOut: true, waitMs: 60000, cancelled: false },
-        { timedOut: false, waitMs: 3200, cancelled: false },
+        { timedOut: true, waitMs: 60000, cancelled: false, settledBy: 'timeout' },
+        { timedOut: false, waitMs: 3200, cancelled: false, settledBy: 'idle' },
       ],
       'frame_00003.jpg': [
-        { timedOut: true, waitMs: 60000, cancelled: false },
-        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: true, waitMs: 60000, cancelled: false, settledBy: 'timeout' },
+        { timedOut: true, waitMs: 60000, cancelled: false, settledBy: 'timeout' },
       ],
     };
 
     const timedOutFrames: string[] = [];
-    const timeoutsObserved: number[] = [];
+    const settledBy: SettleReason[] = [];
 
     for (const frameFileName of frames) {
       let attempt = 0;
-      let placeCount = 0;
       const settle = await settleViewWithRetry({
-        placeCamera: () => {
-          placeCount += 1;
-        },
-        waitForSettle: async (timeoutMs) => {
-          timeoutsObserved.push(timeoutMs);
-          return outcomes[frameFileName][attempt++];
-        },
+        placeCamera: () => {},
+        waitForSettle: async () => outcomes[frameFileName][attempt++],
       });
+      settledBy.push(settle.settledBy);
       if (settle.timedOut) timedOutFrames.push(frameFileName);
-      if (frameFileName === 'frame_00001.jpg') expect(placeCount).toBe(1);
-      else expect(placeCount).toBe(2);
     }
 
-    expect(timeoutsObserved.every((ms) => ms === 60000)).toBe(true);
+    expect(settledBy).toEqual(['tilesLoaded', 'idle', 'timeout']);
     expect(timedOutFrames).toEqual(['frame_00003.jpg']);
   });
 
@@ -456,7 +612,7 @@ describe('Universal 60s settle timeout, single retry, timedOut tracking, and war
       waitForSettle: async (timeoutMs) => {
         waitCalls += 1;
         expect(timeoutMs).toBe(60000);
-        return { timedOut: false, waitMs: 300, cancelled: true };
+        return { timedOut: false, waitMs: 300, cancelled: true, settledBy: 'timeout' };
       },
     });
 
@@ -466,6 +622,7 @@ describe('Universal 60s settle timeout, single retry, timedOut tracking, and war
       timedOut: false,
       waitMs: 300,
       cancelled: true,
+      settledBy: 'timeout',
       retried: false,
       attempts: 1,
     });

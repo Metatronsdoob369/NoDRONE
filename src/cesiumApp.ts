@@ -93,11 +93,19 @@ import {
 import {
   applyTrainingModeSceneSettings,
   buildCaptureRenderSettingsJson,
+  CAPTURE_NETWORK_IDLE_MS,
   CAPTURE_SETTLE_TIMEOUT_MS,
+  collectUniqueTilesets,
   formatTimeoutWarningToast,
+  parseTrainingModeSSE,
   restoreTrainingModeSceneSettings,
   settleViewWithRetry,
+  TRAINING_MODE_SSE,
+  waitForSceneSettle,
+  type CaptureSettleResult,
+  type SettleReason,
   type TrainingModeSceneSnapshot,
+  type TrainingModeSSE,
 } from './captureBundleTraining';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
@@ -566,6 +574,7 @@ let cameraPathRemove: (() => void) | null = null;
   let geoBoxVerticalMetersPerPx = 0.25;
   let geoBoxCaptureViews = 12;
   let geoBoxTrainingMode = true;
+  let geoBoxTrainingSSE: TrainingModeSSE = TRAINING_MODE_SSE;
   let geoBoxIncludeHeldOut = false;
   let isCapturingGeoBox = false;
   let geoBoxCaptureCancelled = false;
@@ -1860,41 +1869,21 @@ let cameraPathRemove: (() => void) | null = null;
 
   function waitForRenderFrameSettled(
     timeoutMs = CAPTURE_SETTLE_TIMEOUT_MS
-  ): Promise<{ timedOut: boolean; waitMs: number; cancelled: boolean }> {
-    return new Promise((resolve) => {
-      const startMs = performance.now();
-      let consecutiveReady = 0;
-
-      const step = () => {
-        if (renderPathCancelled || geoBoxCaptureCancelled) {
-          resolve({ timedOut: false, waitMs: Math.round(performance.now() - startMs), cancelled: true });
-          return;
-        }
-        try {
-          viewer.scene.render();
-        } catch {
-          // ignore transient render warning and retry next rAF
-        }
-
-        if (areAllRenderSceneTilesLoaded()) {
-          consecutiveReady += 1;
-        } else {
-          consecutiveReady = 0;
-        }
-
-        const elapsed = performance.now() - startMs;
-        if (consecutiveReady >= 2) {
-          resolve({ timedOut: false, waitMs: Math.round(elapsed), cancelled: false });
-          return;
-        }
-        if (elapsed >= timeoutMs) {
-          resolve({ timedOut: true, waitMs: Math.round(elapsed), cancelled: false });
-          return;
-        }
-        window.requestAnimationFrame(step);
-      };
-
-      window.requestAnimationFrame(step);
+  ): Promise<CaptureSettleResult> {
+    return waitForSceneSettle({
+      timeoutMs,
+      idleMs: CAPTURE_NETWORK_IDLE_MS,
+      renderFrame: () => {
+        viewer.scene.render();
+      },
+      areTilesLoaded: () => areAllRenderSceneTilesLoaded(),
+      isCancelled: () => renderPathCancelled || geoBoxCaptureCancelled,
+      getTilesets: () =>
+        collectUniqueTilesets(viewer, [
+          google3DTileset,
+          ...activeTilesets.map((t) => t.tileset),
+        ].filter(Boolean)),
+      globe: viewer?.scene?.globe,
     });
   }
 
@@ -2215,6 +2204,7 @@ let cameraPathRemove: (() => void) | null = null;
     const startedAt = new Date().toISOString();
     const renderStartMs = performance.now();
     const perFrameWaitMs: number[] = [];
+    const settledBy: SettleReason[] = [];
     const perFrameFovRad: number[] = [];
     const perFrameFovDeg: number[] = [];
     const perFrameSplatCount: number[] = [];
@@ -2391,6 +2381,7 @@ let cameraPathRemove: (() => void) | null = null;
             : NaN;
 
         perFrameWaitMs.push(settle.waitMs);
+        settledBy.push(settle.settledBy);
         perFrameFovRad.push(Number.isFinite(appliedFov) ? Number(appliedFov.toFixed(6)) : 0);
         perFrameFovDeg.push(
           Number.isFinite(appliedFov) ? Number(Cesium.Math.toDegrees(appliedFov).toFixed(3)) : 0
@@ -2548,6 +2539,7 @@ let cameraPathRemove: (() => void) | null = null;
         helperEntitiesVisibleAtCapture,
         timeouts,
         timedOutFrames,
+        settledBy,
         fovRad: firstFovRad,
         fovDeg: firstFovDeg,
         perFrameFovRad,
@@ -2987,6 +2979,10 @@ let cameraPathRemove: (() => void) | null = null;
     const chkTrainingMode = el<HTMLInputElement>('chk-box-training-mode');
     if (chkTrainingMode) {
       chkTrainingMode.disabled = isCapturingGeoBox;
+    }
+    const selectTrainingSSE = el<HTMLSelectElement>('select-box-training-sse');
+    if (selectTrainingSSE) {
+      selectTrainingSSE.disabled = isCapturingGeoBox || !geoBoxTrainingMode;
     }
     const chkHeldOut = el<HTMLInputElement>('chk-box-heldout');
     if (chkHeldOut) {
@@ -4116,8 +4112,10 @@ let cameraPathRemove: (() => void) | null = null;
       dropdownOverride: renderPathResolutionOverride,
     });
     const chkTrainingMode = el<HTMLInputElement>('chk-box-training-mode');
+    const selectTrainingSSE = el<HTMLSelectElement>('select-box-training-sse');
     const chkHeldOut = el<HTMLInputElement>('chk-box-heldout');
     const trainingMode = chkTrainingMode ? chkTrainingMode.checked : geoBoxTrainingMode;
+    const trainingSSE = parseTrainingModeSSE(selectTrainingSSE ? selectTrainingSSE.value : geoBoxTrainingSSE);
     const includeHeldOut = chkHeldOut ? chkHeldOut.checked : geoBoxIncludeHeldOut;
 
     const poses = computeGeoBoxCaptureRig(boxSnapshot, geoBoxCaptureViews, [targetW, targetH]);
@@ -4205,6 +4203,7 @@ let cameraPathRemove: (() => void) | null = null;
     interface BundleCapturePassStats {
       timeouts: number;
       timedOutViews: string[];
+      settledBy: SettleReason[];
       perFrameWaitMs: number[];
       perFrameFovRad: number[];
       perFrameFovDeg: number[];
@@ -4217,6 +4216,7 @@ let cameraPathRemove: (() => void) | null = null;
     const createPassStats = (): BundleCapturePassStats => ({
       timeouts: 0,
       timedOutViews: [],
+      settledBy: [],
       perFrameWaitMs: [],
       perFrameFovRad: [],
       perFrameFovDeg: [],
@@ -4242,12 +4242,15 @@ let cameraPathRemove: (() => void) | null = null;
       hideAllHelperGraphicsForCleanRender();
       viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
 
-      // Apply Training mode deterministic scene toggles & SSE=2 across Google 3D + all loaded tilesets
+      // Apply Training mode deterministic scene toggles, selected SSE, and Google 3D dynamicScreenSpaceError
       const extraTilesets = [google3DTileset, ...activeTilesets.map((t) => t.tileset)].filter(
         Boolean
       );
       if (trainingMode) {
-        trainingSnapshot = applyTrainingModeSceneSettings(viewer, extraTilesets);
+        trainingSnapshot = applyTrainingModeSceneSettings(viewer, extraTilesets, {
+          maximumScreenSpaceError: trainingSSE,
+          google3DTileset,
+        });
       }
 
       const renderSettingsJson = buildCaptureRenderSettingsJson({
@@ -4256,6 +4259,8 @@ let cameraPathRemove: (() => void) | null = null;
         resolution: [targetW, targetH],
         trainingMode,
         currentSSE,
+        trainingSSE,
+        google3DTileset,
         extraTilesets,
         date: startedAt,
       });
@@ -4366,6 +4371,7 @@ let cameraPathRemove: (() => void) | null = null;
               : NaN;
 
           stats.perFrameWaitMs.push(settle.waitMs);
+          stats.settledBy.push(settle.settledBy);
           stats.perFrameFovRad.push(Number.isFinite(appliedFov) ? Number(appliedFov.toFixed(6)) : 0);
           stats.perFrameFovDeg.push(
             Number.isFinite(appliedFov) ? Number(Cesium.Math.toDegrees(appliedFov).toFixed(3)) : 0
@@ -4442,6 +4448,7 @@ let cameraPathRemove: (() => void) | null = null;
             helperEntitiesVisibleAtCapture: stats.helperEntitiesVisibleAtCapture,
             timeouts: stats.timeouts,
             timedOutViews: stats.timedOutViews,
+            settledBy: stats.settledBy,
             fovRad: firstFovRad,
             fovDeg: firstFovDeg,
             perFrameFovRad: stats.perFrameFovRad,
@@ -8129,6 +8136,10 @@ let cameraPathRemove: (() => void) | null = null;
 
     el<HTMLInputElement>('chk-box-training-mode')?.addEventListener('change', (ev) => {
       geoBoxTrainingMode = Boolean((ev.currentTarget as HTMLInputElement).checked);
+      syncGeoBoxUI();
+    });
+    el<HTMLSelectElement>('select-box-training-sse')?.addEventListener('change', (ev) => {
+      geoBoxTrainingSSE = parseTrainingModeSSE((ev.currentTarget as HTMLSelectElement).value);
     });
     el<HTMLInputElement>('chk-box-heldout')?.addEventListener('change', (ev) => {
       geoBoxIncludeHeldOut = Boolean((ev.currentTarget as HTMLInputElement).checked);

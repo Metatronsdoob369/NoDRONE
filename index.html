@@ -724,10 +724,17 @@
           </div>
 
           <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-0.5 text-[11px] font-mono text-slate-200">
-            <label for="chk-box-training-mode" title="Turn off atmosphere, fog, sun, moon, skyBox, globe lighting, shadows, and splat overlay; set tilesets SSE=2 during Capture Bundle (restored after)" class="flex items-center gap-1.5 cursor-pointer select-none whitespace-nowrap">
-              <input id="chk-box-training-mode" type="checkbox" checked class="accent-[#d4af63] rounded cursor-pointer" />
-              <span>Training mode</span>
-            </label>
+            <div class="flex items-center gap-1.5">
+              <label for="chk-box-training-mode" title="Turn off atmosphere, fog, sun, moon, skyBox, globe lighting, shadows, and splat overlay; set tilesets SSE and enable dynamicScreenSpaceError on Google 3D tiles during Capture Bundle (restored after)" class="flex items-center gap-1.5 cursor-pointer select-none whitespace-nowrap">
+                <input id="chk-box-training-mode" type="checkbox" checked class="accent-[#d4af63] rounded cursor-pointer" />
+                <span>Training mode</span>
+              </label>
+              <select id="select-box-training-sse" aria-label="Training mode maximumScreenSpaceError" title="Training mode maximumScreenSpaceError (default 4)" class="bg-zinc-900/90 border border-white/15 rounded px-1.5 py-0.5 text-[10px] font-mono text-slate-200 focus:outline-none focus:border-[#d4af63]/60 disabled:opacity-40 cursor-pointer">
+                <option value="2">SSE 2</option>
+                <option value="4" selected>SSE 4</option>
+                <option value="8">SSE 8</option>
+              </select>
+            </div>
             <label for="chk-box-heldout" title="Render 20 extra held-out evaluation views placed between training rings into heldout/" class="flex items-center gap-1.5 cursor-pointer select-none whitespace-nowrap">
               <input id="chk-box-heldout" type="checkbox" class="accent-sky-400 rounded cursor-pointer" />
               <span>Held-out set (20 views)</span>
