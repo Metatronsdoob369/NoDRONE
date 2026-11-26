@@ -93,7 +93,10 @@ import {
 import {
   applyTrainingModeSceneSettings,
   buildCaptureRenderSettingsJson,
+  CAPTURE_SETTLE_TIMEOUT_MS,
+  formatTimeoutWarningToast,
   restoreTrainingModeSceneSettings,
+  settleViewWithRetry,
   type TrainingModeSceneSnapshot,
 } from './captureBundleTraining';
 
@@ -661,21 +664,26 @@ let cameraPathRemove: (() => void) | null = null;
   const clipModalDownload = el<HTMLAnchorElement>('btn-download-clip-modal');
   const webglFallback = el<HTMLDivElement>('webgl-fallback');
 
-  function showToast(message: string, type: 'info' | 'error' = 'info'): void {
+  function showToast(message: string, type: 'info' | 'warn' | 'error' = 'info'): void {
     if (!toastContainer) return;
     const toast = document.createElement('div');
     const colorClass =
       type === 'error'
         ? 'bg-red-950/90 border-red-500/40 text-red-200'
-        : 'bg-zinc-900/95 border-zinc-700/80 text-zinc-100';
+        : type === 'warn'
+          ? 'bg-amber-950/95 border-amber-500/50 text-amber-200'
+          : 'bg-zinc-900/95 border-zinc-700/80 text-zinc-100';
     toast.className = `px-4 py-2.5 rounded-xl border backdrop-blur-md text-xs font-medium shadow-2xl transition-all duration-200 opacity-0 translate-y-2 ${colorClass}`;
     toast.textContent = message;
     toastContainer.appendChild(toast);
     requestAnimationFrame(() => toast.classList.remove('opacity-0', 'translate-y-2'));
-    window.setTimeout(() => {
-      toast.classList.add('opacity-0', 'translate-y-2');
-      window.setTimeout(() => toast.remove(), 250);
-    }, 3400);
+    window.setTimeout(
+      () => {
+        toast.classList.add('opacity-0', 'translate-y-2');
+        window.setTimeout(() => toast.remove(), 250);
+      },
+      type === 'warn' ? 5200 : 3400
+    );
   }
 
   function logEvent(message: string, level: LogLevel = 'info'): void {
@@ -1851,7 +1859,7 @@ let cameraPathRemove: (() => void) | null = null;
   }
 
   function waitForRenderFrameSettled(
-    timeoutMs = 15000
+    timeoutMs = CAPTURE_SETTLE_TIMEOUT_MS
   ): Promise<{ timedOut: boolean; waitMs: number; cancelled: boolean }> {
     return new Promise((resolve) => {
       const startMs = performance.now();
@@ -2217,6 +2225,7 @@ let cameraPathRemove: (() => void) | null = null;
     let chunkStartFrame = 1;
     let renderedFrames = 0;
     let timeouts = 0;
+    const timedOutFrames: string[] = [];
     let abortedWithError = false;
 
     const flushZipPart = (frameEnd: number, includeLogBytes?: Uint8Array<ArrayBuffer>) => {
@@ -2330,31 +2339,50 @@ let cameraPathRemove: (() => void) | null = null;
       for (let i = 0; i < total; i++) {
         if (renderPathCancelled) break;
         const s = path.samples[i];
+        const frameNum = String(i + 1).padStart(5, '0');
+        const frameFileName = `frame_${frameNum}.jpg`;
 
-        // Exact camera placement: no flyTo, no animation
-        viewer.camera.setView({
-          destination: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, s.height),
-          orientation: {
-            heading: Cesium.Math.toRadians(s.heading),
-            pitch: Cesium.Math.toRadians(s.pitch),
-            roll: Cesium.Math.toRadians(s.roll),
-          },
+        const avgMs = i > 0 ? (performance.now() - renderStartMs) / i : NaN;
+        const etaBefore = Number.isFinite(avgMs) ? formatEtaSeconds(((total - i) * avgMs) / 1000) : '--:--';
+        updateProgressUI(i + 1, timeouts, etaBefore);
+
+        const placeFrameCamera = () => {
+          // Exact camera placement: no flyTo, no animation
+          viewer.camera.setView({
+            destination: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, s.height),
+            orientation: {
+              heading: Cesium.Math.toRadians(s.heading),
+              pitch: Cesium.Math.toRadians(s.pitch),
+              roll: Cesium.Math.toRadians(s.roll),
+            },
+          });
+
+          if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
+            viewer.camera.frustum.aspectRatio = targetW / targetH;
+          }
+
+          // Cesium PerspectiveFrustum.fovy is read-only; set frustum.fov instead
+          if (
+            typeof s.fovyDeg === 'number' &&
+            Number.isFinite(s.fovyDeg) &&
+            s.fovyDeg > 1 &&
+            s.fovyDeg < 175 &&
+            viewer.camera.frustum &&
+            typeof viewer.camera.frustum.fov === 'number'
+          ) {
+            viewer.camera.frustum.fov = computeAppliedFovRad(s.fovyDeg, targetW, targetH);
+          }
+        };
+
+        const settle = await settleViewWithRetry({
+          placeCamera: placeFrameCamera,
+          waitForSettle: (timeoutMs) => waitForRenderFrameSettled(timeoutMs),
+          isCancelled: () => renderPathCancelled,
         });
-
-        if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
-          viewer.camera.frustum.aspectRatio = targetW / targetH;
-        }
-
-        // Cesium PerspectiveFrustum.fovy is read-only; set frustum.fov instead
-        if (
-          typeof s.fovyDeg === 'number' &&
-          Number.isFinite(s.fovyDeg) &&
-          s.fovyDeg > 1 &&
-          s.fovyDeg < 175 &&
-          viewer.camera.frustum &&
-          typeof viewer.camera.frustum.fov === 'number'
-        ) {
-          viewer.camera.frustum.fov = computeAppliedFovRad(s.fovyDeg, targetW, targetH);
+        if (settle.cancelled || renderPathCancelled) break;
+        if (settle.timedOut) {
+          timeouts += 1;
+          timedOutFrames.push(frameFileName);
         }
 
         const appliedFov =
@@ -2362,13 +2390,6 @@ let cameraPathRemove: (() => void) | null = null;
             ? Number(viewer.camera.frustum.fov)
             : NaN;
 
-        const avgMs = i > 0 ? (performance.now() - renderStartMs) / i : NaN;
-        const etaBefore = Number.isFinite(avgMs) ? formatEtaSeconds(((total - i) * avgMs) / 1000) : '--:--';
-        updateProgressUI(i + 1, timeouts, etaBefore);
-
-        const settle = await waitForRenderFrameSettled(15000);
-        if (settle.cancelled || renderPathCancelled) break;
-        if (settle.timedOut) timeouts += 1;
         perFrameWaitMs.push(settle.waitMs);
         perFrameFovRad.push(Number.isFinite(appliedFov) ? Number(appliedFov.toFixed(6)) : 0);
         perFrameFovDeg.push(
@@ -2413,9 +2434,6 @@ let cameraPathRemove: (() => void) | null = null;
         } else {
           jpegBlob = await captureCanvasJpegBlob(canvas, 0.95);
         }
-
-        const frameNum = String(i + 1).padStart(5, '0');
-        const frameFileName = `frame_${frameNum}.jpg`;
 
         if (dirHandle) {
           // Stream each frame straight to disk without holding blobs in memory
@@ -2529,6 +2547,7 @@ let cameraPathRemove: (() => void) | null = null;
         cleanRender,
         helperEntitiesVisibleAtCapture,
         timeouts,
+        timedOutFrames,
         fovRad: firstFovRad,
         fovDeg: firstFovDeg,
         perFrameFovRad,
@@ -2542,6 +2561,7 @@ let cameraPathRemove: (() => void) | null = null;
         outputMode: dirHandle ? 'folder' : 'zip-parts',
       };
       const logJson = JSON.stringify(renderLog, null, 2);
+      const timeoutWarning = formatTimeoutWarningToast(timedOutFrames.length, 'frame');
 
       if (dirHandle) {
         try {
@@ -2557,8 +2577,12 @@ let cameraPathRemove: (() => void) | null = null;
           renderPathStatusEl.textContent = `Saved · ${renderedFrames}f · ${timeouts} timeout${timeouts === 1 ? '' : 's'}`;
           renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[170px]';
         }
-        logEvent(`Render complete: ${renderedFrames} frames, ${timeouts} timeouts.`, 'ok');
+        logEvent(
+          `Render complete: ${renderedFrames} frames, ${timeouts} timeouts.`,
+          timeouts > 0 ? 'warn' : 'ok'
+        );
         showToast(`Render complete (${renderedFrames} frames saved to folder).`);
+        if (timeoutWarning) showToast(timeoutWarning, 'warn');
       } else {
         const logBytes = new TextEncoder().encode(logJson);
         const logBuf = new Uint8Array(new ArrayBuffer(logBytes.byteLength));
@@ -2570,27 +2594,58 @@ let cameraPathRemove: (() => void) | null = null;
           renderPathStatusEl.textContent = `Ready · ${renderedFrames}f${partsLabel} · ${timeouts}t`;
           renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[170px]';
         }
-        logEvent(`Render complete: ${renderedFrames} frames, ${timeouts} timeouts.`, 'ok');
+        logEvent(
+          `Render complete: ${renderedFrames} frames, ${timeouts} timeouts.`,
+          timeouts > 0 ? 'warn' : 'ok'
+        );
         showToast(
           renderZipParts.length > 1
             ? `Render complete (${renderedFrames} frames in ${renderZipParts.length} zip parts).`
             : `Render complete (${renderedFrames} frames). Click Download Render.`
         );
+        if (timeoutWarning) showToast(timeoutWarning, 'warn');
       }
     } else {
       updateRenderPathButtons();
     }
   }
 
-  function capturePngSnapshot(): boolean {
-    if (!viewer || !viewer.scene) return false;
+  let isCapturingSnapshot = false;
+
+  async function capturePngSnapshot(): Promise<boolean> {
+    if (!viewer || !viewer.scene || isCapturingSnapshot || isCapturingGeoBox || isRenderingPath) {
+      return false;
+    }
+    isCapturingSnapshot = true;
+    const savedUseDefaultLoop = viewer.useDefaultRenderLoop;
+    const snapshotCameraPos = viewer.camera.position.clone();
+    const snapshotHeading = viewer.camera.heading;
+    const snapshotPitch = viewer.camera.pitch;
+    const snapshotRoll = viewer.camera.roll;
+
     try {
+      viewer.useDefaultRenderLoop = false;
+
+      const settle = await settleViewWithRetry({
+        placeCamera: () => {
+          viewer.camera.setView({
+            destination: snapshotCameraPos,
+            orientation: {
+              heading: snapshotHeading,
+              pitch: snapshotPitch,
+              roll: snapshotRoll,
+            },
+          });
+        },
+        waitForSettle: (timeoutMs) => waitForRenderFrameSettled(timeoutMs),
+      });
+
       const container = document.getElementById('cesium-container') as HTMLElement | null;
       const cesiumCanvas = viewer.scene.canvas as HTMLCanvasElement;
       const targetW = cesiumCanvas.width || 1280;
       const targetH = cesiumCanvas.height || 720;
 
-      viewer.render();
+      viewer.scene.render();
       const overlayCanvas = splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null;
 
       let dataUrl: string;
@@ -2630,13 +2685,26 @@ let cameraPathRemove: (() => void) | null = null;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      logEvent('Exported high-resolution viewport snapshot (PNG).', 'ok');
-      showToast('Snapshot PNG downloaded.');
+      if (settle.timedOut) {
+        const warningMsg = formatTimeoutWarningToast(1, 'snapshot');
+        logEvent('Exported viewport snapshot (PNG) after settle timeout and retry.', 'warn');
+        showToast('Snapshot PNG downloaded.');
+        if (warningMsg) showToast(warningMsg, 'warn');
+      } else {
+        logEvent('Exported high-resolution viewport snapshot (PNG).', 'ok');
+        showToast('Snapshot PNG downloaded.');
+      }
       return true;
     } catch (err: any) {
       logEvent(`Snapshot failed: ${err?.message || err}`, 'error');
       showToast('Snapshot blocked by cross-origin imagery.', 'error');
       return false;
+    } finally {
+      viewer.useDefaultRenderLoop = savedUseDefaultLoop;
+      if (savedUseDefaultLoop) {
+        viewer.scene.render();
+      }
+      isCapturingSnapshot = false;
     }
   }
 
@@ -4136,6 +4204,7 @@ let cameraPathRemove: (() => void) | null = null;
 
     interface BundleCapturePassStats {
       timeouts: number;
+      timedOutViews: string[];
       perFrameWaitMs: number[];
       perFrameFovRad: number[];
       perFrameFovDeg: number[];
@@ -4147,6 +4216,7 @@ let cameraPathRemove: (() => void) | null = null;
 
     const createPassStats = (): BundleCapturePassStats => ({
       timeouts: 0,
+      timedOutViews: [],
       perFrameWaitMs: [],
       perFrameFovRad: [],
       perFrameFovDeg: [],
@@ -4261,11 +4331,33 @@ let cameraPathRemove: (() => void) | null = null;
           const p = passPoses[i];
           updateProgress(progressOffset + i + 1, label);
 
-          if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
-            viewer.camera.frustum.aspectRatio = targetW / targetH;
-          }
-          if (viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
-            viewer.camera.frustum.fov = computeAppliedFovRad(p.fovyDeg, targetW, targetH);
+          const placeViewCamera = () => {
+            if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
+              viewer.camera.frustum.aspectRatio = targetW / targetH;
+            }
+            if (viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
+              viewer.camera.frustum.fov = computeAppliedFovRad(p.fovyDeg, targetW, targetH);
+            }
+            viewer.camera.setView({
+              destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.height),
+              orientation: {
+                heading: Cesium.Math.toRadians(p.heading),
+                pitch: Cesium.Math.toRadians(p.pitch),
+                roll: Cesium.Math.toRadians(p.roll),
+              },
+            });
+          };
+
+          const settle = await settleViewWithRetry({
+            trainingMode,
+            placeCamera: placeViewCamera,
+            waitForSettle: (timeoutMs) => waitForRenderFrameSettled(timeoutMs),
+            isCancelled: () => geoBoxCaptureCancelled,
+          });
+          if (settle.cancelled || geoBoxCaptureCancelled) break;
+          if (settle.timedOut) {
+            stats.timeouts += 1;
+            stats.timedOutViews.push(p.fileName);
           }
 
           const appliedFov =
@@ -4273,18 +4365,6 @@ let cameraPathRemove: (() => void) | null = null;
               ? Number(viewer.camera.frustum.fov)
               : NaN;
 
-          viewer.camera.setView({
-            destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.height),
-            orientation: {
-              heading: Cesium.Math.toRadians(p.heading),
-              pitch: Cesium.Math.toRadians(p.pitch),
-              roll: Cesium.Math.toRadians(p.roll),
-            },
-          });
-
-          const settle = await waitForRenderFrameSettled(12000);
-          if (settle.cancelled || geoBoxCaptureCancelled) break;
-          if (settle.timedOut) stats.timeouts += 1;
           stats.perFrameWaitMs.push(settle.waitMs);
           stats.perFrameFovRad.push(Number.isFinite(appliedFov) ? Number(appliedFov.toFixed(6)) : 0);
           stats.perFrameFovDeg.push(
@@ -4361,6 +4441,7 @@ let cameraPathRemove: (() => void) | null = null;
             trainingMode,
             helperEntitiesVisibleAtCapture: stats.helperEntitiesVisibleAtCapture,
             timeouts: stats.timeouts,
+            timedOutViews: stats.timedOutViews,
             fovRad: firstFovRad,
             fovDeg: firstFovDeg,
             perFrameFovRad: stats.perFrameFovRad,
@@ -4531,12 +4612,18 @@ let cameraPathRemove: (() => void) | null = null;
           heldOutStats.frameFileNames.length > 0
             ? ` + ${heldOutStats.frameFileNames.length} held-out`
             : '';
+        const totalTimedOutViews =
+          trainingStats.timedOutViews.length + heldOutStats.timedOutViews.length;
+        const bundleTimeoutWarning = formatTimeoutWarningToast(totalTimedOutViews, 'view');
         showToast(
           `Studio Bundle ready (${activeSurvey.surveyId}): ${poses.length} views${heldOutSuffix} @ ${targetW}×${targetH} (${formatFileSizeMb(zipBlob.size)})`
         );
+        if (bundleTimeoutWarning) {
+          showToast(bundleTimeoutWarning, 'warn');
+        }
         logEvent(
-          `Exported Splat Studio Bundle "${fileName}" linked to survey "${activeSurvey.surveyId}" (${poses.length} PNG views${heldOutSuffix}, ${targetW}×${targetH}, trainingMode=${trainingMode}).`,
-          'ok'
+          `Exported Splat Studio Bundle "${fileName}" linked to survey "${activeSurvey.surveyId}" (${poses.length} PNG views${heldOutSuffix}, ${targetW}×${targetH}, trainingMode=${trainingMode}, timedOutViews=${totalTimedOutViews}).`,
+          totalTimedOutViews > 0 ? 'warn' : 'ok'
         );
       } else if (geoBoxCaptureCancelled) {
         showToast('Studio Bundle capture canceled.');
@@ -7588,7 +7675,9 @@ let cameraPathRemove: (() => void) | null = null;
       const res = startRecord360Lap();
       if (res.ok) setActiveCard(null);
     });
-    el<HTMLButtonElement>('btn-snapshot-png')?.addEventListener('click', capturePngSnapshot);
+    el<HTMLButtonElement>('btn-snapshot-png')?.addEventListener('click', () => {
+      void capturePngSnapshot();
+    });
     el<HTMLButtonElement>('btn-stop-rec-banner')?.addEventListener('click', stopRecording);
 
     // Offline Render Path Controls
@@ -8861,7 +8950,7 @@ let cameraPathRemove: (() => void) | null = null;
         }
 
         case 'takeSnapshot': {
-          const ok = capturePngSnapshot();
+          const ok = await capturePngSnapshot();
           return {
             ok,
             message: ok ? 'High-resolution PNG snapshot downloaded.' : 'Snapshot capture failed.',

@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   applyTrainingModeSceneSettings,
   buildCaptureRenderSettingsJson,
+  CAPTURE_SETTLE_TIMEOUT_MS,
+  DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS,
+  formatTimeoutWarningToast,
+  getCaptureSettleTimeoutMs,
   restoreTrainingModeSceneSettings,
+  settleViewWithRetry,
+  TRAINING_MODE_SETTLE_TIMEOUT_MS,
   TRAINING_MODE_SSE,
 } from '../captureBundleTraining';
 import {
@@ -280,5 +286,205 @@ describe('Capture Bundle Training mode toggles and render_settings.json', () => 
     expect(viewer.scene.msaaSamples).toBe(4);
     expect(googleTileset.maximumScreenSpaceError).toBe(8);
     expect(siteTileset.maximumScreenSpaceError).toBe(12);
+  });
+});
+
+describe('Universal 60s settle timeout, single retry, timedOut tracking, and warning toasts', () => {
+  it('uses 60s max timeout for ALL capture modes (Training ON, Training OFF, Render Path, snapshots)', () => {
+    expect(CAPTURE_SETTLE_TIMEOUT_MS).toBe(60000);
+    expect(TRAINING_MODE_SETTLE_TIMEOUT_MS).toBe(60000);
+    expect(DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS).toBe(60000);
+    expect(getCaptureSettleTimeoutMs(true)).toBe(60000);
+    expect(getCaptureSettleTimeoutMs(false)).toBe(60000);
+    expect(getCaptureSettleTimeoutMs()).toBe(60000);
+  });
+
+  it('saves fast-settling frames immediately without retrying and retries timed-out views once across Training ON, Training OFF, held-out, and Render Path', async () => {
+    const viewFiles = [
+      'frames/view_001.png', // settles fast on first try (180ms)
+      'frames/view_002.png', // times out once, succeeds on retry
+      'frames/view_003.png', // times out twice -> kept & logged in timedOutViews
+      'heldout/view_001.png', // held-out view times out twice -> kept & logged in heldout_render-log.json
+    ];
+
+    const outcomesByView: Record<string, Array<{ timedOut: boolean; waitMs: number; cancelled: boolean }>> = {
+      'frames/view_001.png': [{ timedOut: false, waitMs: 180, cancelled: false }],
+      'frames/view_002.png': [
+        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: false, waitMs: 8500, cancelled: false },
+      ],
+      'frames/view_003.png': [
+        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: true, waitMs: 60000, cancelled: false },
+      ],
+      'heldout/view_001.png': [
+        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: true, waitMs: 60000, cancelled: false },
+      ],
+    };
+
+    const setViewCallsByView: Record<string, number> = {};
+    const observedTimeouts: number[] = [];
+    const savedTrainingPngs: string[] = [];
+    const trainingTimedOutViews: string[] = [];
+    const savedHeldOutPngs: string[] = [];
+    const heldOutTimedOutViews: string[] = [];
+
+    // Run with Training mode OFF to verify 60s + retry applies even when Training mode is OFF
+    for (const fileName of viewFiles) {
+      setViewCallsByView[fileName] = 0;
+      let attemptIdx = 0;
+
+      const result = await settleViewWithRetry({
+        trainingMode: false,
+        placeCamera: () => {
+          setViewCallsByView[fileName] += 1;
+        },
+        waitForSettle: async (timeoutMs) => {
+          observedTimeouts.push(timeoutMs);
+          const outcome = outcomesByView[fileName][attemptIdx];
+          attemptIdx += 1;
+          return outcome;
+        },
+      });
+
+      const isHeldOut = fileName.startsWith('heldout/');
+      if (isHeldOut) {
+        savedHeldOutPngs.push(fileName);
+        if (result.timedOut) heldOutTimedOutViews.push(fileName);
+      } else {
+        savedTrainingPngs.push(fileName);
+        if (result.timedOut) trainingTimedOutViews.push(fileName);
+      }
+
+      if (fileName === 'frames/view_001.png') {
+        expect(result).toEqual({
+          timedOut: false,
+          waitMs: 180,
+          cancelled: false,
+          retried: false,
+          attempts: 1,
+        });
+      } else if (fileName === 'frames/view_002.png') {
+        expect(result).toEqual({
+          timedOut: false,
+          waitMs: 68500,
+          cancelled: false,
+          retried: true,
+          attempts: 2,
+        });
+      } else {
+        expect(result).toEqual({
+          timedOut: true,
+          waitMs: 120000,
+          cancelled: false,
+          retried: true,
+          attempts: 2,
+        });
+      }
+    }
+
+    // Every wait call used 60s max even with Training mode OFF
+    expect(observedTimeouts.every((ms) => ms === 60000)).toBe(true);
+
+    // setView re-ran exactly once for each initially timed-out view, never for fast-settling view_001
+    expect(setViewCallsByView).toEqual({
+      'frames/view_001.png': 1,
+      'frames/view_002.png': 2,
+      'frames/view_003.png': 2,
+      'heldout/view_001.png': 2,
+    });
+
+    // All PNGs are kept, and only views that timed out again after retry are listed in timedOutViews
+    expect(savedTrainingPngs).toEqual([
+      'frames/view_001.png',
+      'frames/view_002.png',
+      'frames/view_003.png',
+    ]);
+    expect(trainingTimedOutViews).toEqual(['frames/view_003.png']);
+    expect(savedHeldOutPngs).toEqual(['heldout/view_001.png']);
+    expect(heldOutTimedOutViews).toEqual(['heldout/view_001.png']);
+  });
+
+  it('tracks Render Path timedOutFrames with 60s timeout + single retry and omits frames recovered on retry', async () => {
+    const frames = ['frame_00001.jpg', 'frame_00002.jpg', 'frame_00003.jpg'];
+    const outcomes: Record<string, Array<{ timedOut: boolean; waitMs: number; cancelled: boolean }>> = {
+      'frame_00001.jpg': [{ timedOut: false, waitMs: 95, cancelled: false }],
+      'frame_00002.jpg': [
+        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: false, waitMs: 3200, cancelled: false },
+      ],
+      'frame_00003.jpg': [
+        { timedOut: true, waitMs: 60000, cancelled: false },
+        { timedOut: true, waitMs: 60000, cancelled: false },
+      ],
+    };
+
+    const timedOutFrames: string[] = [];
+    const timeoutsObserved: number[] = [];
+
+    for (const frameFileName of frames) {
+      let attempt = 0;
+      let placeCount = 0;
+      const settle = await settleViewWithRetry({
+        placeCamera: () => {
+          placeCount += 1;
+        },
+        waitForSettle: async (timeoutMs) => {
+          timeoutsObserved.push(timeoutMs);
+          return outcomes[frameFileName][attempt++];
+        },
+      });
+      if (settle.timedOut) timedOutFrames.push(frameFileName);
+      if (frameFileName === 'frame_00001.jpg') expect(placeCount).toBe(1);
+      else expect(placeCount).toBe(2);
+    }
+
+    expect(timeoutsObserved.every((ms) => ms === 60000)).toBe(true);
+    expect(timedOutFrames).toEqual(['frame_00003.jpg']);
+  });
+
+  it('does not retry when cancelled on the first settle attempt', async () => {
+    let placeCalls = 0;
+    let waitCalls = 0;
+
+    const result = await settleViewWithRetry({
+      trainingMode: false,
+      placeCamera: () => {
+        placeCalls += 1;
+      },
+      waitForSettle: async (timeoutMs) => {
+        waitCalls += 1;
+        expect(timeoutMs).toBe(60000);
+        return { timedOut: false, waitMs: 300, cancelled: true };
+      },
+    });
+
+    expect(placeCalls).toBe(1);
+    expect(waitCalls).toBe(1);
+    expect(result).toEqual({
+      timedOut: false,
+      waitMs: 300,
+      cancelled: true,
+      retried: false,
+      attempts: 1,
+    });
+  });
+
+  it('formats warning toast messages with counts only when timeouts > 0', () => {
+    expect(formatTimeoutWarningToast(0, 'frame')).toBeNull();
+    expect(formatTimeoutWarningToast(0, 'view')).toBeNull();
+    expect(formatTimeoutWarningToast(1, 'frame')).toBe(
+      'Warning: 1 frame timed out after retry (saved; listed in render-log.json).'
+    );
+    expect(formatTimeoutWarningToast(3, 'frame')).toBe(
+      'Warning: 3 frames timed out after retry (saved; listed in render-log.json).'
+    );
+    expect(formatTimeoutWarningToast(2, 'view')).toBe(
+      'Warning: 2 views timed out after retry (saved; listed in render-log.json).'
+    );
+    expect(formatTimeoutWarningToast(1, 'snapshot')).toBe(
+      'Warning: 1 snapshot timed out after retry (tiles may be incomplete).'
+    );
   });
 });

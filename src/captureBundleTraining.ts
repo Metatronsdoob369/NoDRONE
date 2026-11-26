@@ -1,4 +1,87 @@
 export const TRAINING_MODE_SSE = 2;
+export const CAPTURE_SETTLE_TIMEOUT_MS = 60000;
+export const TRAINING_MODE_SETTLE_TIMEOUT_MS = CAPTURE_SETTLE_TIMEOUT_MS;
+export const DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS = CAPTURE_SETTLE_TIMEOUT_MS;
+
+export interface CaptureSettleResult {
+  timedOut: boolean;
+  waitMs: number;
+  cancelled: boolean;
+}
+
+export interface CaptureSettleWithRetryResult extends CaptureSettleResult {
+  retried: boolean;
+  attempts: number;
+}
+
+/**
+ * Returns the maximum per-frame/per-view settle timeout (60 s) for all capture modes
+ * (Capture Bundle Training ON/OFF, Render Path, and snapshots). Frames that settle
+ * faster still resolve immediately once tiles finish loading.
+ */
+export function getCaptureSettleTimeoutMs(_trainingMode?: boolean): number {
+  return CAPTURE_SETTLE_TIMEOUT_MS;
+}
+
+/**
+ * Places the camera and waits for tiles to settle up to the 60 s maximum timeout.
+ * Frames that settle quickly resolve immediately. If the first attempt times out,
+ * re-runs `placeCamera` and waits once more.
+ */
+export async function settleViewWithRetry(options: {
+  trainingMode?: boolean;
+  placeCamera: () => void;
+  waitForSettle: (timeoutMs: number) => Promise<CaptureSettleResult>;
+  isCancelled?: () => boolean;
+}): Promise<CaptureSettleWithRetryResult> {
+  const timeoutMs = getCaptureSettleTimeoutMs(options.trainingMode);
+
+  options.placeCamera();
+  const first = await options.waitForSettle(timeoutMs);
+  if (first.cancelled || options.isCancelled?.()) {
+    return {
+      timedOut: false,
+      waitMs: first.waitMs,
+      cancelled: true,
+      retried: false,
+      attempts: 1,
+    };
+  }
+  if (!first.timedOut) {
+    return {
+      timedOut: false,
+      waitMs: first.waitMs,
+      cancelled: false,
+      retried: false,
+      attempts: 1,
+    };
+  }
+
+  // First attempt timed out: retry once (re-run setView + wait)
+  options.placeCamera();
+  const second = await options.waitForSettle(timeoutMs);
+  const cancelled = second.cancelled || Boolean(options.isCancelled?.());
+  return {
+    timedOut: !cancelled && second.timedOut,
+    waitMs: first.waitMs + second.waitMs,
+    cancelled,
+    retried: true,
+    attempts: 2,
+  };
+}
+
+export function formatTimeoutWarningToast(
+  count: number,
+  unit: 'frame' | 'view' | 'snapshot'
+): string | null {
+  if (!Number.isFinite(count) || count <= 0) return null;
+  const n = Math.round(count);
+  const plural = n === 1 ? '' : 's';
+  if (unit === 'snapshot') {
+    return `Warning: ${n} snapshot${plural} timed out after retry (tiles may be incomplete).`;
+  }
+  return `Warning: ${n} ${unit}${plural} timed out after retry (saved; listed in render-log.json).`;
+}
 
 export interface TrainingModeSceneSnapshot {
   skyAtmosphereShow: boolean | null;
