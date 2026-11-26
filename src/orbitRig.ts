@@ -39,6 +39,16 @@ export interface OrbitRingSpec {
   phaseOffsetDeg: number;
 }
 
+export const DEFAULT_HELDOUT_VIEW_COUNT = 20;
+
+export interface HeldOutOrbitViewSpec {
+  index: number;
+  bandId: string;
+  azimuthDeg: number;
+  elevationDeg: number;
+  distanceScale: number;
+}
+
 export interface OrbitPoseForTrainer {
   index: number;
   fileName: string;
@@ -150,6 +160,150 @@ export function getOrbitPresetSummary(presetViews: number): string {
   const specs = getOrbitRingSpecs(presetViews);
   const total = specs.reduce((acc, r) => acc + r.count, 0);
   return `${total} views (${presetViews} + nadir)`;
+}
+
+/**
+ * Computes the 3D angular separation in degrees between two viewing directions
+ * specified by `(azimuthDeg, elevationDeg)` from the same orbit target.
+ */
+export function angularSeparationDeg(
+  az1Deg: number,
+  el1Deg: number,
+  az2Deg: number,
+  el2Deg: number
+): number {
+  const degToRad = Math.PI / 180;
+  const az1 = az1Deg * degToRad;
+  const el1 = el1Deg * degToRad;
+  const az2 = az2Deg * degToRad;
+  const el2 = el2Deg * degToRad;
+
+  const x1 = Math.cos(el1) * Math.sin(az1);
+  const y1 = Math.cos(el1) * Math.cos(az1);
+  const z1 = Math.sin(el1);
+
+  const x2 = Math.cos(el2) * Math.sin(az2);
+  const y2 = Math.cos(el2) * Math.cos(az2);
+  const z2 = Math.sin(el2);
+
+  const dot = Math.max(-1, Math.min(1, x1 * x2 + y1 * y2 + z1 * z2));
+  return Math.acos(dot) * (180 / Math.PI);
+}
+
+/**
+ * Returns every `(azimuthDeg, elevationDeg, distanceScale)` pose in the
+ * training rig for a given preset.
+ */
+export function getTrainingOrbitAngles(presetViews: number): Array<{
+  ringId: string;
+  role: OrbitRingRole;
+  azimuthDeg: number;
+  elevationDeg: number;
+  distanceScale: number;
+}> {
+  const specs = getOrbitRingSpecs(presetViews);
+  const out: Array<{
+    ringId: string;
+    role: OrbitRingRole;
+    azimuthDeg: number;
+    elevationDeg: number;
+    distanceScale: number;
+  }> = [];
+
+  for (const spec of specs) {
+    for (let i = 0; i < spec.count; i++) {
+      const azimuthDeg = (((i * 360) / spec.count + spec.phaseOffsetDeg) % 360 + 360) % 360;
+      out.push({
+        ringId: spec.id,
+        role: spec.role,
+        azimuthDeg,
+        elevationDeg: spec.elevationDeg,
+        distanceScale: spec.distanceScale,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Generates `count` (default 20) held-out evaluation views placed strictly
+ * between the training rings at half-step elevation and half-step azimuth.
+ * Only inter-ring elevation bands wide enough to stay >= 3 deg away from every
+ * training ring are selected.
+ */
+export function getHeldOutOrbitViews(
+  presetViews: number,
+  count = DEFAULT_HELDOUT_VIEW_COUNT
+): HeldOutOrbitViewSpec[] {
+  const targetCount = Math.max(1, Math.round(count));
+  const sortedRings = [...getOrbitRingSpecs(presetViews)].sort(
+    (a, b) => a.elevationDeg - b.elevationDeg
+  );
+
+  interface InterRingBand {
+    bandId: string;
+    elevationDeg: number;
+    distanceScale: number;
+    halfStepAzOffsetDeg: number;
+  }
+
+  const bands: InterRingBand[] = [];
+  for (let i = 0; i < sortedRings.length - 1; i++) {
+    const lo = sortedRings[i];
+    const hi = sortedRings[i + 1];
+    const gapDeg = hi.elevationDeg - lo.elevationDeg;
+    // Midpoint sits at gapDeg / 2 from both adjacent rings; requiring >= 6.5 deg guarantees >= 3.25 deg separation
+    if (gapDeg < 6.5) continue;
+    const midEl = roundTo((lo.elevationDeg + hi.elevationDeg) * 0.5, 3);
+    const refRing = lo.count >= hi.count ? lo : hi;
+    const azStep = 360 / Math.max(1, refRing.count);
+    const halfStepAzOffsetDeg = roundTo(
+      ((refRing.phaseOffsetDeg + azStep * 0.5) % 360 + 360) % 360,
+      4
+    );
+    bands.push({
+      bandId: `heldout-band-${bands.length}-${midEl}deg`,
+      elevationDeg: midEl,
+      distanceScale: roundTo((lo.distanceScale + hi.distanceScale) * 0.5, 4),
+      halfStepAzOffsetDeg,
+    });
+  }
+
+  // Fallback band if an unusual custom rig had no wide inter-ring gap
+  if (bands.length === 0) {
+    bands.push({
+      bandId: 'heldout-band-0-45deg',
+      elevationDeg: 45,
+      distanceScale: 1.0,
+      halfStepAzOffsetDeg: 9.0,
+    });
+  }
+
+  const basePerBand = Math.floor(targetCount / bands.length);
+  const remainder = targetCount % bands.length;
+  const views: HeldOutOrbitViewSpec[] = [];
+  let idx = 1;
+
+  bands.forEach((band, bandIdx) => {
+    const bandViews = basePerBand + (bandIdx < remainder ? 1 : 0);
+    if (bandViews <= 0) return;
+    const bandAzStep = 360 / bandViews;
+    // Slight per-band azimuthal stagger on top of the neighbor half-step keeps bands well-distributed
+    const bandPhase = (band.halfStepAzOffsetDeg + bandIdx * (bandAzStep * 0.5)) % 360;
+    for (let j = 0; j < bandViews; j++) {
+      const azimuthDeg = roundTo(((j * bandAzStep + bandPhase) % 360 + 360) % 360, 4);
+      views.push({
+        index: idx,
+        bandId: band.bandId,
+        azimuthDeg,
+        elevationDeg: band.elevationDeg,
+        distanceScale: band.distanceScale,
+      });
+      idx += 1;
+    }
+  });
+
+  return views;
 }
 
 function flat16ToNested4x4(

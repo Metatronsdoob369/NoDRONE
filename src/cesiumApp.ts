@@ -84,10 +84,18 @@ import {
 import {
   buildColmapSparseTextFiles,
   buildNerfstudioTransformsJson,
+  DEFAULT_HELDOUT_VIEW_COUNT,
+  getHeldOutOrbitViews,
   getOrbitPresetSummary,
   getOrbitRingSpecs,
   type OrbitRingRole,
 } from './orbitRig';
+import {
+  applyTrainingModeSceneSettings,
+  buildCaptureRenderSettingsJson,
+  restoreTrainingModeSceneSettings,
+  type TrainingModeSceneSnapshot,
+} from './captureBundleTraining';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
 const DEFAULT_ION_TOKEN = '';
@@ -554,6 +562,8 @@ let cameraPathRemove: (() => void) | null = null;
   let geoBoxDragStartBaseOffset = 0;
   let geoBoxVerticalMetersPerPx = 0.25;
   let geoBoxCaptureViews = 12;
+  let geoBoxTrainingMode = true;
+  let geoBoxIncludeHeldOut = false;
   let isCapturingGeoBox = false;
   let geoBoxCaptureCancelled = false;
 
@@ -1848,7 +1858,7 @@ let cameraPathRemove: (() => void) | null = null;
       let consecutiveReady = 0;
 
       const step = () => {
-        if (renderPathCancelled) {
+        if (renderPathCancelled || geoBoxCaptureCancelled) {
           resolve({ timedOut: false, waitMs: Math.round(performance.now() - startMs), cancelled: true });
           return;
         }
@@ -2906,6 +2916,14 @@ let cameraPathRemove: (() => void) | null = null;
     if (btnStripCapture) {
       btnStripCapture.disabled = captureDisabled;
     }
+    const chkTrainingMode = el<HTMLInputElement>('chk-box-training-mode');
+    if (chkTrainingMode) {
+      chkTrainingMode.disabled = isCapturingGeoBox;
+    }
+    const chkHeldOut = el<HTMLInputElement>('chk-box-heldout');
+    if (chkHeldOut) {
+      chkHeldOut.disabled = isCapturingGeoBox;
+    }
 
     if (!geoBox) {
       if (statusEl) {
@@ -3487,7 +3505,7 @@ let cameraPathRemove: (() => void) | null = null;
 
   interface GeoBoxRigPose {
     index: number;
-    ring: OrbitRingRole;
+    ring: OrbitRingRole | 'held-out';
     ringId: string;
     fileName: string;
     lat: number;
@@ -3508,10 +3526,17 @@ let cameraPathRemove: (() => void) | null = null;
     };
   }
 
-  function computeGeoBoxCaptureRig(
+  function buildGeoBoxRigPosesFromSpecs(
     box: GeoDrawBoxState,
-    totalOrbitalViews: number,
-    resolution: [number, number] = [1280, 720]
+    resolution: [number, number],
+    viewSpecs: Array<{
+      ring: OrbitRingRole | 'held-out';
+      ringId: string;
+      azimuthDeg: number;
+      elevationDeg: number;
+      distanceScale: number;
+      fileName: string;
+    }>
   ): GeoBoxRigPose[] {
     const m = computeGeoBoxMetrics(box);
     const originLat = round7(m.centerLat);
@@ -3533,19 +3558,11 @@ let cameraPathRemove: (() => void) | null = null;
     const K = computePinholeK(resolution[0], resolution[1], fovyDeg);
     const targetEnu: [number, number, number] = [0, 0, roundTo(m.heightMeters * 0.5, 4)];
 
-    const ringSpecs = getOrbitRingSpecs(totalOrbitalViews);
     const poses: GeoBoxRigPose[] = [];
-    let idx = 1;
-
-    const pushPose = (
-      ring: OrbitRingRole,
-      ringId: string,
-      azimuthDeg: number,
-      elevationDeg: number,
-      rangeMeters: number
-    ) => {
-      const azRad = Cesium.Math.toRadians(azimuthDeg);
-      const elRad = Cesium.Math.toRadians(elevationDeg);
+    viewSpecs.forEach((spec, i) => {
+      const rangeMeters = standoff * spec.distanceScale;
+      const azRad = Cesium.Math.toRadians(spec.azimuthDeg);
+      const elRad = Cesium.Math.toRadians(spec.elevationDeg);
       const horiz = rangeMeters * Math.cos(elRad);
       // Camera offset in local ENU relative to box center midpoint
       const east = horiz * Math.sin(azRad);
@@ -3559,8 +3576,8 @@ let cameraPathRemove: (() => void) | null = null;
         new Cesium.Cartesian3()
       );
       const camCarto = Cesium.Cartographic.fromCartesian(camCartesian);
-      const heading = (azimuthDeg + 180) % 360;
-      const pitch = -elevationDeg;
+      const heading = (spec.azimuthDeg + 180) % 360;
+      const pitch = -spec.elevationDeg;
 
       const camEnu: [number, number, number] = [
         roundTo(east, 6),
@@ -3578,10 +3595,10 @@ let cameraPathRemove: (() => void) | null = null;
       };
 
       poses.push({
-        index: idx,
-        ring,
-        ringId,
-        fileName: `frames/view_${String(idx).padStart(3, '0')}.png`,
+        index: i + 1,
+        ring: spec.ring,
+        ringId: spec.ringId,
+        fileName: spec.fileName,
         lat: Number(Cesium.Math.toDegrees(camCarto.latitude).toFixed(7)),
         lon: Number(Cesium.Math.toDegrees(camCarto.longitude).toFixed(7)),
         height: Number(camCarto.height.toFixed(2)),
@@ -3604,18 +3621,62 @@ let cameraPathRemove: (() => void) | null = null;
           lookAt: [0, Number((m.heightMeters * 0.5).toFixed(3)), 0],
         },
       });
-      idx += 1;
-    };
-
-    for (const spec of ringSpecs) {
-      const range = standoff * spec.distanceScale;
-      for (let i = 0; i < spec.count; i++) {
-        const az = (i * 360) / spec.count + spec.phaseOffsetDeg;
-        pushPose(spec.role, spec.id, az, spec.elevationDeg, range);
-      }
-    }
+    });
 
     return poses;
+  }
+
+  function computeGeoBoxCaptureRig(
+    box: GeoDrawBoxState,
+    totalOrbitalViews: number,
+    resolution: [number, number] = [1920, 1080]
+  ): GeoBoxRigPose[] {
+    const ringSpecs = getOrbitRingSpecs(totalOrbitalViews);
+    const viewSpecs: Array<{
+      ring: OrbitRingRole;
+      ringId: string;
+      azimuthDeg: number;
+      elevationDeg: number;
+      distanceScale: number;
+      fileName: string;
+    }> = [];
+    let idx = 1;
+    for (const spec of ringSpecs) {
+      for (let i = 0; i < spec.count; i++) {
+        const az = (i * 360) / spec.count + spec.phaseOffsetDeg;
+        viewSpecs.push({
+          ring: spec.role,
+          ringId: spec.id,
+          azimuthDeg: az,
+          elevationDeg: spec.elevationDeg,
+          distanceScale: spec.distanceScale,
+          fileName: `frames/view_${String(idx).padStart(3, '0')}.png`,
+        });
+        idx += 1;
+      }
+    }
+    return buildGeoBoxRigPosesFromSpecs(box, resolution, viewSpecs);
+  }
+
+  function computeGeoBoxHeldOutRig(
+    box: GeoDrawBoxState,
+    totalOrbitalViews: number,
+    resolution: [number, number] = [1920, 1080],
+    heldOutCount = DEFAULT_HELDOUT_VIEW_COUNT
+  ): GeoBoxRigPose[] {
+    const heldOutSpecs = getHeldOutOrbitViews(totalOrbitalViews, heldOutCount);
+    return buildGeoBoxRigPosesFromSpecs(
+      box,
+      resolution,
+      heldOutSpecs.map((spec) => ({
+        ring: 'held-out',
+        ringId: spec.bandId,
+        azimuthDeg: spec.azimuthDeg,
+        elevationDeg: spec.elevationDeg,
+        distanceScale: spec.distanceScale,
+        fileName: `heldout/view_${String(spec.index).padStart(3, '0')}.png`,
+      }))
+    );
   }
 
   function loadGeoBoxRigIntoRenderPath(): void {
@@ -3982,10 +4043,25 @@ let cameraPathRemove: (() => void) | null = null;
     const container = el<HTMLDivElement>('cesium-container');
     if (!container) return;
 
-    const targetW = Math.max(640, canvas.width || 1280);
-    const targetH = Math.max(360, canvas.height || 720);
+    const [targetW, targetH] = resolveEffectiveRenderResolution({
+      pathJson: null,
+      dropdownOverride: renderPathResolutionOverride,
+    });
+    const chkTrainingMode = el<HTMLInputElement>('chk-box-training-mode');
+    const chkHeldOut = el<HTMLInputElement>('chk-box-heldout');
+    const trainingMode = chkTrainingMode ? chkTrainingMode.checked : geoBoxTrainingMode;
+    const includeHeldOut = chkHeldOut ? chkHeldOut.checked : geoBoxIncludeHeldOut;
+
     const poses = computeGeoBoxCaptureRig(boxSnapshot, geoBoxCaptureViews, [targetW, targetH]);
-    const total = poses.length;
+    const heldOutPoses = includeHeldOut
+      ? computeGeoBoxHeldOutRig(
+          boxSnapshot,
+          geoBoxCaptureViews,
+          [targetW, targetH],
+          DEFAULT_HELDOUT_VIEW_COUNT
+        )
+      : [];
+    const total = poses.length + heldOutPoses.length;
 
     stopRenderPathPreview();
     isCapturingGeoBox = true;
@@ -3994,8 +4070,10 @@ let cameraPathRemove: (() => void) | null = null;
     setFlightMode('explore');
     syncGeoBoxUI();
 
-    // Save camera, FOV, render loop, HUD visibility, and draw-box visibility
+    // Save camera, FOV, render loop, resolution settings, container/canvas styles, HUD visibility, and helper states
     const savedUseDefaultLoop = viewer.useDefaultRenderLoop;
+    const savedUseBrowserRecommendedResolution = viewer.useBrowserRecommendedResolution;
+    const savedResolutionScale = viewer.resolutionScale;
     const savedCameraPos = viewer.camera.position.clone();
     const savedHeading = viewer.camera.heading;
     const savedPitch = viewer.camera.pitch;
@@ -4005,6 +4083,28 @@ let cameraPathRemove: (() => void) | null = null;
         ? viewer.camera.frustum.fov
         : null;
     const savedBoxVisible = geoBox.visible;
+    const savedHelperEntityStates: Array<{ ent: any; show: boolean }> = getAllHelperEntities().map(
+      (ent) => ({ ent, show: ent.show !== false })
+    );
+    let trainingSnapshot: TrainingModeSceneSnapshot | null = null;
+
+    const savedCanvasStyle = {
+      width: canvas.style.width,
+      height: canvas.style.height,
+    };
+    const savedContainerStyle = {
+      position: container.style.position,
+      top: container.style.top,
+      left: container.style.left,
+      right: container.style.right,
+      bottom: container.style.bottom,
+      width: container.style.width,
+      height: container.style.height,
+      minWidth: container.style.minWidth,
+      minHeight: container.style.minHeight,
+      maxWidth: container.style.maxWidth,
+      maxHeight: container.style.maxHeight,
+    };
 
     const hudElements = [
       document.querySelector('header') as HTMLElement | null,
@@ -4032,10 +4132,33 @@ let cameraPathRemove: (() => void) | null = null;
     const outputCtx = outputCanvas.getContext('2d');
     const logoSafetyCache = new Map<string, boolean>();
     const zipEntries: ZipEntryInput[] = [];
+    const startedAt = new Date().toISOString();
 
-    const updateProgress = (step: number) => {
+    interface BundleCapturePassStats {
+      timeouts: number;
+      perFrameWaitMs: number[];
+      perFrameFovRad: number[];
+      perFrameFovDeg: number[];
+      perFrameSplatCount: number[];
+      helperEntitiesVisibleAtCapture: number[];
+      frameFileNames: string[];
+      anyOverlaySplats: boolean;
+    }
+
+    const createPassStats = (): BundleCapturePassStats => ({
+      timeouts: 0,
+      perFrameWaitMs: [],
+      perFrameFovRad: [],
+      perFrameFovDeg: [],
+      perFrameSplatCount: [],
+      helperEntitiesVisibleAtCapture: [],
+      frameFileNames: [],
+      anyOverlaySplats: false,
+    });
+
+    const updateProgress = (step: number, label: string) => {
       if (renderProgressText) {
-        renderProgressText.textContent = `Capturing Studio view ${step} / ${total} (${m.name})…`;
+        renderProgressText.textContent = `${label} ${step} / ${total} (${m.name})…`;
       }
       if (renderProgressBar) {
         const pct = total > 0 ? Math.min(100, Math.round((step / total) * 100)) : 0;
@@ -4044,99 +4167,239 @@ let cameraPathRemove: (() => void) | null = null;
     };
 
     try {
-      // Hide HUD + temporary hide gold wireframe & path overlays so captured PNGs are clean photorealistic views
+      // Activate cleanRenderActive guard so Geo-Box & path overlay builders cannot re-create visible helpers mid-capture
+      cleanRenderActive = true;
+      hideAllHelperGraphicsForCleanRender();
+      viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
+
+      // Apply Training mode deterministic scene toggles & SSE=2 across Google 3D + all loaded tilesets
+      const extraTilesets = [google3DTileset, ...activeTilesets.map((t) => t.tileset)].filter(
+        Boolean
+      );
+      if (trainingMode) {
+        trainingSnapshot = applyTrainingModeSceneSettings(viewer, extraTilesets);
+      }
+
+      const renderSettingsJson = buildCaptureRenderSettingsJson({
+        viewer,
+        cesiumVersion: Cesium.VERSION || 'unknown',
+        resolution: [targetW, targetH],
+        trainingMode,
+        currentSSE,
+        extraTilesets,
+        date: startedAt,
+      });
+
+      // Hide app HUD panels (keep Cesium/Google credits container visible for attribution compositing)
       for (const { node } of savedHudDisplays) {
         node.style.display = 'none';
       }
-      geoBoxEntities.forEach((ent) => {
-        ent.show = false;
-      });
-      renderPathEntities.forEach((ent) => {
-        ent.show = false;
-      });
-      setMapLabelsTemporarilyHidden(true);
       if (renderProgressOverlay) {
         renderProgressOverlay.classList.remove('hidden');
         renderProgressOverlay.classList.add('flex');
       }
-      updateProgress(0);
+      updateProgress(0, 'Capturing Studio view');
 
+      // Force output pixels to exact target resolution regardless of devicePixelRatio
+      const dpr = window.devicePixelRatio || 1;
       viewer.useDefaultRenderLoop = false;
-      const encoder = new TextEncoder();
+      viewer.useBrowserRecommendedResolution = false;
+      viewer.resolutionScale = 1 / dpr;
 
-      for (let i = 0; i < poses.length; i++) {
-        if (geoBoxCaptureCancelled) break;
-        const p = poses[i];
-        updateProgress(i + 1);
+      container.style.position = 'fixed';
+      container.style.top = '0px';
+      container.style.left = '0px';
+      container.style.right = 'auto';
+      container.style.bottom = 'auto';
+      container.style.width = `${targetW}px`;
+      container.style.height = `${targetH}px`;
+      container.style.minWidth = `${targetW}px`;
+      container.style.minHeight = `${targetH}px`;
+      container.style.maxWidth = 'none';
+      container.style.maxHeight = 'none';
+      viewer.resize();
 
-        if (viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
-          viewer.camera.frustum.fov = computeAppliedFovRad(p.fovyDeg, targetW, targetH);
-        }
+      await new Promise<void>((r) => window.requestAnimationFrame(() => r()));
+      viewer.resize();
 
-        viewer.camera.setView({
-          destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.height),
-          orientation: {
-            heading: Cesium.Math.toRadians(p.heading),
-            pitch: Cesium.Math.toRadians(p.pitch),
-            roll: Cesium.Math.toRadians(p.roll),
-          },
-        });
-
-        await waitForRenderFrameSettled(12000);
-        if (geoBoxCaptureCancelled) break;
-        viewer.scene.render();
-        const overlayCanvas = splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null;
-
-        let pngBlob: Blob;
-        if (outputCtx) {
-          outputCtx.clearRect(0, 0, targetW, targetH);
-          outputCtx.drawImage(canvas, 0, 0, targetW, targetH);
-          if (overlayCanvas) {
-            try {
-              outputCtx.drawImage(overlayCanvas, 0, 0, targetW, targetH);
-            } catch {
-              // Ignore transient overlay draw errors
-            }
-          }
-          compositeCreditsOntoFrame(outputCtx, targetW, targetH, container, logoSafetyCache);
-          try {
-            pngBlob = await captureCanvasPngBlob(outputCanvas);
-          } catch {
-            pngBlob = await captureCanvasPngBlob(canvas);
-          }
-        } else {
-          pngBlob = await captureCanvasPngBlob(canvas);
-        }
-
-        const pngBytes = new Uint8Array(await pngBlob.arrayBuffer());
-        zipEntries.push({
-          name: p.fileName,
-          data: pngBytes,
-        });
+      canvas.style.width = `${targetW}px`;
+      canvas.style.height = `${targetH}px`;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
       }
 
-      if (!geoBoxCaptureCancelled && zipEntries.length > 0) {
+      if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
+        viewer.camera.frustum.aspectRatio = targetW / targetH;
+      }
+
+      // Exact-pixel check before view 1 (identical to Render Path)
+      const gl = viewer.scene?.context?._gl as WebGLRenderingContext | WebGL2RenderingContext | undefined;
+      const drawingW = gl ? gl.drawingBufferWidth : canvas.width;
+      const drawingH = gl ? gl.drawingBufferHeight : canvas.height;
+      if (
+        canvas.width !== targetW ||
+        canvas.height !== targetH ||
+        drawingW !== targetW ||
+        drawingH !== targetH
+      ) {
+        throw new Error(
+          `Canvas resolution mismatch before view 1: expected ${targetW}×${targetH}, got canvas ${canvas.width}×${canvas.height} (WebGL buffer ${drawingW}×${drawingH}, dpr=${dpr}). Aborting Capture Bundle.`
+        );
+      }
+
+      const encoder = new TextEncoder();
+
+      const capturePosePass = async (
+        passPoses: GeoBoxRigPose[],
+        label: string,
+        progressOffset: number
+      ): Promise<BundleCapturePassStats> => {
+        const stats = createPassStats();
+        for (let i = 0; i < passPoses.length; i++) {
+          if (geoBoxCaptureCancelled) break;
+          const p = passPoses[i];
+          updateProgress(progressOffset + i + 1, label);
+
+          if (viewer.camera.frustum && typeof viewer.camera.frustum.aspectRatio === 'number') {
+            viewer.camera.frustum.aspectRatio = targetW / targetH;
+          }
+          if (viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
+            viewer.camera.frustum.fov = computeAppliedFovRad(p.fovyDeg, targetW, targetH);
+          }
+
+          const appliedFov =
+            viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number'
+              ? Number(viewer.camera.frustum.fov)
+              : NaN;
+
+          viewer.camera.setView({
+            destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.height),
+            orientation: {
+              heading: Cesium.Math.toRadians(p.heading),
+              pitch: Cesium.Math.toRadians(p.pitch),
+              roll: Cesium.Math.toRadians(p.roll),
+            },
+          });
+
+          const settle = await waitForRenderFrameSettled(12000);
+          if (settle.cancelled || geoBoxCaptureCancelled) break;
+          if (settle.timedOut) stats.timeouts += 1;
+          stats.perFrameWaitMs.push(settle.waitMs);
+          stats.perFrameFovRad.push(Number.isFinite(appliedFov) ? Number(appliedFov.toFixed(6)) : 0);
+          stats.perFrameFovDeg.push(
+            Number.isFinite(appliedFov) ? Number(Cesium.Math.toDegrees(appliedFov).toFixed(3)) : 0
+          );
+
+          // Re-hide every helper entity + map labels right before capture, flush EntityVisualizer, then render once
+          hideAllHelperGraphicsForCleanRender();
+          stats.helperEntitiesVisibleAtCapture.push(countVisibleHelperEntities());
+          viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
+          viewer.scene.render();
+
+          // Do NOT composite splat overlay into Capture Bundle frames while Training mode is ON
+          const overlayCanvas = trainingMode
+            ? null
+            : (splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null);
+          const overlayStats = trainingMode ? null : splatOverlay?.getActiveSplatStats();
+          const frameSplatCount =
+            overlayCanvas && overlayStats?.hasVisibleSplat ? overlayStats.splatCount : 0;
+          if (frameSplatCount > 0) stats.anyOverlaySplats = true;
+          stats.perFrameSplatCount.push(frameSplatCount);
+
+          let pngBlob: Blob;
+          if (outputCtx) {
+            outputCtx.clearRect(0, 0, targetW, targetH);
+            outputCtx.drawImage(canvas, 0, 0, targetW, targetH);
+            if (overlayCanvas) {
+              try {
+                outputCtx.drawImage(overlayCanvas, 0, 0, targetW, targetH);
+              } catch {
+                // Ignore transient overlay draw errors
+              }
+            }
+            compositeCreditsOntoFrame(outputCtx, targetW, targetH, container, logoSafetyCache);
+            try {
+              pngBlob = await captureCanvasPngBlob(outputCanvas);
+            } catch {
+              pngBlob = await captureCanvasPngBlob(canvas);
+            }
+          } else {
+            pngBlob = await captureCanvasPngBlob(canvas);
+          }
+
+          const pngBytes = new Uint8Array(await pngBlob.arrayBuffer());
+          zipEntries.push({
+            name: p.fileName,
+            data: pngBytes,
+          });
+          stats.frameFileNames.push(p.fileName);
+        }
+        return stats;
+      };
+
+      const trainingStats = await capturePosePass(poses, 'Capturing Studio view', 0);
+      const heldOutStats =
+        includeHeldOut && heldOutPoses.length > 0 && !geoBoxCaptureCancelled
+          ? await capturePosePass(heldOutPoses, 'Capturing Held-out view', poses.length)
+          : createPassStats();
+
+      if (!geoBoxCaptureCancelled && trainingStats.frameFileNames.length > 0) {
+        const finishedAt = new Date().toISOString();
+        const buildBundleRenderLog = (stats: BundleCapturePassStats, outputMode: string) => {
+          const firstFovRad = stats.perFrameFovRad.length > 0 ? stats.perFrameFovRad[0] : null;
+          const firstFovDeg = stats.perFrameFovDeg.length > 0 ? stats.perFrameFovDeg[0] : null;
+          const maxOverlaySplatCount = stats.perFrameSplatCount.reduce(
+            (mx, n) => (n > mx ? n : mx),
+            0
+          );
+          return {
+            frameCount: stats.frameFileNames.length,
+            fps: 30,
+            resolution: [targetW, targetH] as [number, number],
+            cleanRender: true,
+            trainingMode,
+            helperEntitiesVisibleAtCapture: stats.helperEntitiesVisibleAtCapture,
+            timeouts: stats.timeouts,
+            fovRad: firstFovRad,
+            fovDeg: firstFovDeg,
+            perFrameFovRad: stats.perFrameFovRad,
+            perFrameFovDeg: stats.perFrameFovDeg,
+            perFrameWaitMs: stats.perFrameWaitMs,
+            frameFileNames: stats.frameFileNames,
+            overlaySplats: stats.anyOverlaySplats,
+            overlaySplatCount: maxOverlaySplatCount,
+            perFrameSplatCount: stats.perFrameSplatCount,
+            startedAt,
+            finishedAt,
+            outputMode,
+          };
+        };
+
+        const anchor = {
+          lat: m.centerLat,
+          lon: m.centerLon,
+          baseHeightMeters: m.baseEllipsoidalMeters,
+        };
         const anchorsJson = buildGeoBoxAnchorsJson(boxSnapshot);
         const cameraMatricesJson = buildGeoBoxCameraMatricesJson(boxSnapshot, poses);
         const trajectoryJson = buildGeoBoxTrajectoryJson(boxSnapshot, poses, [targetW, targetH]);
         const bundleManifest = buildSplatStudioManifest(boxSnapshot, poses, [targetW, targetH]);
         const cameraPathJson = buildGeoBoxCameraPathJson(boxSnapshot, poses, [targetW, targetH]);
         const geoJson = buildGeoBoxGeoJson(boxSnapshot);
+        // Training manifests strictly include ONLY training poses (never held-out poses)
         const transformsJson = buildNerfstudioTransformsJson(poses, {
           siteName: m.name,
-          anchor: {
-            lat: m.centerLat,
-            lon: m.centerLon,
-            baseHeightMeters: m.baseEllipsoidalMeters,
-          },
+          anchor,
         });
         const colmapSparse = buildColmapSparseTextFiles(poses, {
           widthMeters: m.widthMeters,
           depthMeters: m.depthMeters,
           heightMeters: m.heightMeters,
         });
+        const renderLogJson = buildBundleRenderLog(trainingStats, 'capture-bundle-zip');
 
-        zipEntries.unshift(
+        const manifestEntries: ZipEntryInput[] = [
           {
             name: 'anchors.json',
             data: encoder.encode(JSON.stringify(anchorsJson, null, 2)),
@@ -4176,14 +4439,51 @@ let cameraPathRemove: (() => void) | null = null;
           {
             name: 'box-footprint.geojson',
             data: encoder.encode(JSON.stringify(geoJson, null, 2)),
-          }
-        );
+          },
+          {
+            name: 'render_settings.json',
+            data: encoder.encode(JSON.stringify(renderSettingsJson, null, 2)),
+          },
+          {
+            name: 'render-log.json',
+            data: encoder.encode(JSON.stringify(renderLogJson, null, 2)),
+          },
+        ];
+
+        if (includeHeldOut && heldOutStats.frameFileNames.length > 0) {
+          const heldOutTransformsJson = buildNerfstudioTransformsJson(
+            heldOutPoses.map((p) => ({
+              ...p,
+              fileName: p.fileName.replace(/^heldout\//, ''),
+            })),
+            {
+              siteName: m.name,
+              anchor,
+            }
+          );
+          const heldOutRenderLogJson = buildBundleRenderLog(
+            heldOutStats,
+            'capture-bundle-heldout'
+          );
+          manifestEntries.push(
+            {
+              name: 'heldout/heldout_transforms.json',
+              data: encoder.encode(JSON.stringify(heldOutTransformsJson, null, 2)),
+            },
+            {
+              name: 'heldout/heldout_render-log.json',
+              data: encoder.encode(JSON.stringify(heldOutRenderLogJson, null, 2)),
+            }
+          );
+        }
+
+        zipEntries.unshift(...manifestEntries);
 
         // Decoupled Sidecar Provenance Registry with cryptographic SHA-256 hashes of every artifact + PNG frame
         const provenanceJson = await buildGeoBoxProvenanceJson(boxSnapshot, zipEntries);
         const provenanceBytes = encoder.encode(JSON.stringify(provenanceJson, null, 2));
         const provenanceDigest = await sha256Hex(provenanceBytes);
-        zipEntries.splice(10, 0, {
+        zipEntries.splice(manifestEntries.length, 0, {
           name: 'provenance.json',
           data: provenanceBytes,
         });
@@ -4227,9 +4527,15 @@ let cameraPathRemove: (() => void) | null = null;
         a.click();
         window.setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-        showToast(`Studio Bundle ready (${activeSurvey.surveyId}): ${poses.length} views + 7 manifests (${formatFileSizeMb(zipBlob.size)})`);
+        const heldOutSuffix =
+          heldOutStats.frameFileNames.length > 0
+            ? ` + ${heldOutStats.frameFileNames.length} held-out`
+            : '';
+        showToast(
+          `Studio Bundle ready (${activeSurvey.surveyId}): ${poses.length} views${heldOutSuffix} @ ${targetW}×${targetH} (${formatFileSizeMb(zipBlob.size)})`
+        );
         logEvent(
-          `Exported Splat Studio Bundle "${fileName}" linked to survey "${activeSurvey.surveyId}" (${poses.length} PNG views + 7 manifests).`,
+          `Exported Splat Studio Bundle "${fileName}" linked to survey "${activeSurvey.surveyId}" (${poses.length} PNG views${heldOutSuffix}, ${targetW}×${targetH}, trainingMode=${trainingMode}).`,
           'ok'
         );
       } else if (geoBoxCaptureCancelled) {
@@ -4240,7 +4546,26 @@ let cameraPathRemove: (() => void) | null = null;
       showToast(`Studio Bundle capture failed: ${err?.message || err}`, 'error');
       logEvent(`Studio Bundle capture error: ${err?.message || err}`, 'error');
     } finally {
-      // Restore camera, draw-box entities, render loop, and HUD cleanly
+      // Restore canvas & container dimensions, pixel scale, camera, Training mode toggles, helper entities, render loop, and HUD cleanly
+      canvas.style.width = savedCanvasStyle.width;
+      canvas.style.height = savedCanvasStyle.height;
+
+      container.style.position = savedContainerStyle.position;
+      container.style.top = savedContainerStyle.top;
+      container.style.left = savedContainerStyle.left;
+      container.style.right = savedContainerStyle.right;
+      container.style.bottom = savedContainerStyle.bottom;
+      container.style.width = savedContainerStyle.width;
+      container.style.height = savedContainerStyle.height;
+      container.style.minWidth = savedContainerStyle.minWidth;
+      container.style.minHeight = savedContainerStyle.minHeight;
+      container.style.maxWidth = savedContainerStyle.maxWidth;
+      container.style.maxHeight = savedContainerStyle.maxHeight;
+
+      viewer.useBrowserRecommendedResolution = savedUseBrowserRecommendedResolution;
+      viewer.resolutionScale = savedResolutionScale;
+      viewer.resize();
+
       viewer.camera.setView({
         destination: savedCameraPos,
         orientation: {
@@ -4252,17 +4577,24 @@ let cameraPathRemove: (() => void) | null = null;
       if (savedFov !== null && viewer.camera.frustum && typeof viewer.camera.frustum.fov === 'number') {
         viewer.camera.frustum.fov = savedFov;
       }
-      viewer.useDefaultRenderLoop = savedUseDefaultLoop;
+
+      restoreTrainingModeSceneSettings(viewer, trainingSnapshot);
+
+      cleanRenderActive = false;
       if (geoBox) {
         geoBox.visible = savedBoxVisible;
       }
-      geoBoxEntities.forEach((ent) => {
-        ent.show = savedBoxVisible;
-      });
-      renderPathEntities.forEach((ent) => {
-        ent.show = true;
-      });
+      for (const { ent, show } of savedHelperEntityStates) {
+        ent.show = show;
+      }
       setMapLabelsTemporarilyHidden(false);
+      refreshGeoBoxGraphics();
+      renderLoadedPathOverlay();
+
+      viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
+      viewer.useDefaultRenderLoop = savedUseDefaultLoop;
+      viewer.scene.render();
+
       for (const { node, display } of savedHudDisplays) {
         node.style.display = display;
       }
@@ -7706,6 +8038,13 @@ let cameraPathRemove: (() => void) | null = null;
       });
     });
 
+    el<HTMLInputElement>('chk-box-training-mode')?.addEventListener('change', (ev) => {
+      geoBoxTrainingMode = Boolean((ev.currentTarget as HTMLInputElement).checked);
+    });
+    el<HTMLInputElement>('chk-box-heldout')?.addEventListener('change', (ev) => {
+      geoBoxIncludeHeldOut = Boolean((ev.currentTarget as HTMLInputElement).checked);
+    });
+
     el<HTMLButtonElement>('btn-box-capture-bundle')?.addEventListener('click', () => {
       void captureGeoBoxStudioBundle();
     });
@@ -7715,8 +8054,10 @@ let cameraPathRemove: (() => void) | null = null;
 
     el<HTMLButtonElement>('btn-box-export-json')?.addEventListener('click', () => {
       if (!geoBox) return;
-      const canvas = viewer?.scene?.canvas as HTMLCanvasElement | undefined;
-      const res: [number, number] = [canvas?.width || 1280, canvas?.height || 720];
+      const res = resolveEffectiveRenderResolution({
+        pathJson: null,
+        dropdownOverride: renderPathResolutionOverride,
+      });
       const poses = computeGeoBoxCaptureRig(geoBox, geoBoxCaptureViews, res);
       const manifest = buildSplatStudioManifest(geoBox, poses, res);
       const slug =

@@ -723,6 +723,17 @@
             </div>
           </div>
 
+          <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-0.5 text-[11px] font-mono text-slate-200">
+            <label for="chk-box-training-mode" title="Turn off atmosphere, fog, sun, moon, skyBox, globe lighting, shadows, and splat overlay; set tilesets SSE=2 during Capture Bundle (restored after)" class="flex items-center gap-1.5 cursor-pointer select-none whitespace-nowrap">
+              <input id="chk-box-training-mode" type="checkbox" checked class="accent-[#d4af63] rounded cursor-pointer" />
+              <span>Training mode</span>
+            </label>
+            <label for="chk-box-heldout" title="Render 20 extra held-out evaluation views placed between training rings into heldout/" class="flex items-center gap-1.5 cursor-pointer select-none whitespace-nowrap">
+              <input id="chk-box-heldout" type="checkbox" class="accent-sky-400 rounded cursor-pointer" />
+              <span>Held-out set (20 views)</span>
+            </label>
+          </div>
+
           <div class="space-y-1.5">
             <div class="grid grid-cols-2 gap-1.5">
               <button id="btn-box-capture-bundle" type="button" disabled title="Capture PNG frames + transforms.json + COLMAP sparse/0 + camera_matrices.json into a ZIP" class="chrono-pusher chrono-pusher-gold py-2 px-2.5 rounded-lg text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">
