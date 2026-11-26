@@ -47,6 +47,13 @@ import {
 } from './geodesy';
 import { MAJOR_CITIES, US_STATES, WORLD_COUNTRIES } from './placesDataset';
 import {
+  extractPathJsonRenderResolution,
+  formatResolutionValue,
+  parseResolutionPresetValue,
+  resolveEffectiveRenderResolution,
+  type RenderResolution,
+} from './renderPathResolution';
+import {
   applySurveySplatRef,
   classifyTilesetRefs,
   createDefaultSurveyRecord,
@@ -298,6 +305,9 @@ let cameraPathRemove: (() => void) | null = null;
 
   // Offline Render Path State
   let loadedRenderPath: LoadedRenderPath | null = null;
+  let loadedRenderPathBadgePrefix = '';
+  let renderPathResolutionOverride: RenderResolution | null = null;
+  let renderPathCleanRender = true;
   let isRenderingPath = false;
   let renderPathCancelled = false;
   let renderZipParts: RenderZipPart[] = [];
@@ -413,6 +423,8 @@ let cameraPathRemove: (() => void) | null = null;
   const manifestFileInput = el<HTMLInputElement>('input-manifest-file');
   const renderPathFileInput = el<HTMLInputElement>('input-render-path-file');
   const renderPathStatusEl = el<HTMLSpanElement>('render-path-status');
+  const selectRenderPathResolution = el<HTMLSelectElement>('select-render-path-resolution');
+  const chkRenderClean = el<HTMLInputElement>('chk-render-clean');
   const btnRenderFrames = el<HTMLButtonElement>('btn-render-frames');
   const btnRenderToFolder = el<HTMLButtonElement>('btn-render-to-folder');
   const renderZipPartsList = el<HTMLDivElement>('render-zip-parts-list');
@@ -1366,6 +1378,29 @@ let cameraPathRemove: (() => void) | null = null;
     renderPathPreviewRaf = window.requestAnimationFrame(tick);
   }
 
+  function syncRenderPathResolutionSelect(res: RenderResolution): void {
+    if (!selectRenderPathResolution) return;
+    const prevCustom = selectRenderPathResolution.querySelector('option[data-custom-resolution="true"]');
+    if (prevCustom) prevCustom.remove();
+    const val = formatResolutionValue(res);
+    const hasOption = Array.from(selectRenderPathResolution.options).some((opt) => opt.value === val);
+    if (!hasOption) {
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = `${res[0]}×${res[1]} (JSON)`;
+      opt.setAttribute('data-custom-resolution', 'true');
+      selectRenderPathResolution.appendChild(opt);
+    }
+    selectRenderPathResolution.value = val;
+  }
+
+  function updateRenderPathStatusBadge(): void {
+    if (!renderPathStatusEl || !loadedRenderPath) return;
+    const prefix = loadedRenderPathBadgePrefix ? `${loadedRenderPathBadgePrefix} ` : '';
+    renderPathStatusEl.textContent = `${prefix}${loadedRenderPath.samples.length}f · ${loadedRenderPath.resolution[0]}×${loadedRenderPath.resolution[1]} · ${loadedRenderPath.fps}fps`;
+    renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[190px]';
+  }
+
   function updateRenderPathButtons(): void {
     const btnJump = el<HTMLButtonElement>('btn-path-jump');
     const btnPreview = el<HTMLButtonElement>('btn-path-preview');
@@ -1379,6 +1414,12 @@ let cameraPathRemove: (() => void) | null = null;
       btnPreview.disabled = !loadedRenderPath || isRenderingPath;
       btnPreview.setAttribute('data-active', String(isPreviewingRenderPath));
       btnPreview.textContent = isPreviewingRenderPath ? 'Stop Preview' : 'Preview Path';
+    }
+    if (selectRenderPathResolution) {
+      selectRenderPathResolution.disabled = isRenderingPath;
+    }
+    if (chkRenderClean) {
+      chkRenderClean.disabled = isRenderingPath;
     }
     if (btnRenderToFolder) {
       if (supportsDirectoryPicker) {
@@ -1407,14 +1448,11 @@ let cameraPathRemove: (() => void) | null = null;
   ): void {
     stopRenderPathPreview();
     loadedRenderPath = path;
+    loadedRenderPathBadgePrefix = badgePrefix;
     clearRenderZipParts();
     renderLoadedPathOverlay();
-
-    if (renderPathStatusEl) {
-      const prefix = badgePrefix ? `${badgePrefix} ` : '';
-      renderPathStatusEl.textContent = `${prefix}${path.samples.length}f · ${path.resolution[0]}×${path.resolution[1]} · ${path.fps}fps`;
-      renderPathStatusEl.className = 'font-mono text-emerald-300 tabular-nums truncate max-w-[190px]';
-    }
+    syncRenderPathResolutionSelect(path.resolution);
+    updateRenderPathStatusBadge();
     updateRenderPathButtons();
     flyToLoadedRenderPathStart(1.4);
     logEvent(detailLog, 'ok');
@@ -1425,6 +1463,14 @@ let cameraPathRemove: (() => void) | null = null;
     try {
       const text = await file.text();
       const raw = JSON.parse(text);
+      const jsonRenderRes = extractPathJsonRenderResolution(raw);
+      if (jsonRenderRes) {
+        renderPathResolutionOverride = null;
+      }
+      const resolvedRes = resolveEffectiveRenderResolution({
+        pathJson: raw,
+        dropdownOverride: renderPathResolutionOverride,
+      });
 
       // Format 1: Google Earth Studio 3D Tracking Data JSON (`cameraFrames[]`)
       if (isGesTrackingJson(raw)) {
@@ -1437,11 +1483,11 @@ let cameraPathRemove: (() => void) | null = null;
             fileName: file.name,
             site: ges.name || el<HTMLInputElement>('input-site-title')?.value || 'ges-site',
             fps: ges.fps,
-            resolution: [ges.width, ges.height],
+            resolution: resolvedRes,
             samples: ges.cesiumSamples,
           },
           'GES',
-          `Loaded GES 3D Tracking "${file.name}" (${ges.cesiumSamples.length} frames @ ${ges.width}×${ges.height}, ${ges.fps} fps, Blender f=${ges.blenderFocalMm.toFixed(2)}mm) — flying to Frame 1.`,
+          `Loaded GES 3D Tracking "${file.name}" (${ges.cesiumSamples.length} frames @ ${resolvedRes[0]}×${resolvedRes[1]}, ${ges.fps} fps, Blender f=${ges.blenderFocalMm.toFixed(2)}mm) — flying to Frame 1.`,
           `Loaded GES path (${ges.cesiumSamples.length} frames) — flying to start`
         );
         return;
@@ -1463,14 +1509,11 @@ let cameraPathRemove: (() => void) | null = null;
           const fovyDeg = Number.isFinite(Number(p?.fovyDeg)) ? Number(p.fovyDeg) : null;
           return { t: Number((idx / 30).toFixed(4)), lat, lon, height, heading, pitch, roll, fovyDeg };
         });
-        const resArr = raw?.sceneContext?.resolution;
-        const resW = Array.isArray(resArr) && Number(resArr[0]) >= 64 ? Math.round(Number(resArr[0])) : 1280;
-        const resH = Array.isArray(resArr) && Number(resArr[1]) >= 64 ? Math.round(Number(resArr[1])) : 720;
         const site = String(raw?.asset?.name || file.name.replace(/\.json$/i, '')).trim();
         finalizeLoadedRenderPath(
-          { fileName: file.name, site, fps: 30, resolution: [resW, resH], samples },
+          { fileName: file.name, site, fps: 30, resolution: resolvedRes, samples },
           'BUNDLE',
-          `Loaded Splat Studio Bundle "${file.name}" (${samples.length} camera poses @ ${resW}×${resH}) — flying to View 1.`,
+          `Loaded Splat Studio Bundle "${file.name}" (${samples.length} camera poses @ ${resolvedRes[0]}×${resolvedRes[1]}) — flying to View 1.`,
           `Loaded Studio Bundle (${samples.length} views) — flying to View 1`
         );
         return;
@@ -1504,15 +1547,12 @@ let cameraPathRemove: (() => void) | null = null;
             fovyDeg,
           };
         });
-        const firstK = frames[0]?.K;
-        const resW = Number.isFinite(Number(firstK?.width)) ? Math.round(Number(firstK.width)) : 1920;
-        const resH = Number.isFinite(Number(firstK?.height)) ? Math.round(Number(firstK.height)) : 1080;
         const fps = Number.isFinite(Number(raw.fps)) && Number(raw.fps) > 0 ? Number(raw.fps) : 30;
         const site = String(raw.name || file.name.replace(/\.json$/i, '')).trim();
         finalizeLoadedRenderPath(
-          { fileName: file.name, site, fps, resolution: [resW, resH], samples },
+          { fileName: file.name, site, fps, resolution: resolvedRes, samples },
           'MAT',
-          `Loaded camera_matrices.json "${file.name}" (${samples.length} frames @ ${resW}×${resH}, ${fps} fps) — flying to Frame 1.`,
+          `Loaded camera_matrices.json "${file.name}" (${samples.length} frames @ ${resolvedRes[0]}×${resolvedRes[1]}, ${fps} fps) — flying to Frame 1.`,
           `Loaded camera matrices (${samples.length} frames) — flying to start`
         );
         return;
@@ -1528,11 +1568,11 @@ let cameraPathRemove: (() => void) | null = null;
             fileName: file.name,
             site: parsed.site,
             fps: parsed.fps,
-            resolution: parsed.resolution,
+            resolution: resolvedRes,
             samples: parsed.samples,
           },
           'TRAJ',
-          `Loaded trajectory.json "${file.name}" (${parsed.samples.length} frames @ ${parsed.resolution[0]}×${parsed.resolution[1]}, ${parsed.fps} fps${parsed.surveyId ? `, survey ${parsed.surveyId}` : ''}) — flying to Frame 1.`,
+          `Loaded trajectory.json "${file.name}" (${parsed.samples.length} frames @ ${resolvedRes[0]}×${resolvedRes[1]}, ${parsed.fps} fps${parsed.surveyId ? `, survey ${parsed.surveyId}` : ''}) — flying to Frame 1.`,
           `Loaded trajectory (${parsed.samples.length} frames) — flying to start`
         );
         return;
@@ -1550,11 +1590,11 @@ let cameraPathRemove: (() => void) | null = null;
           fileName: file.name,
           site: parsed.site,
           fps: parsed.fps,
-          resolution: parsed.resolution,
+          resolution: resolvedRes,
           samples: parsed.samples,
         },
         '',
-        `Loaded render path "${file.name}" (${parsed.samples.length} frames @ ${parsed.resolution[0]}×${parsed.resolution[1]}, ${parsed.fps} fps${parsed.surveyId ? `, survey ${parsed.surveyId}` : ''}) — flying to Frame 1.`,
+        `Loaded render path "${file.name}" (${parsed.samples.length} frames @ ${resolvedRes[0]}×${resolvedRes[1]}, ${parsed.fps} fps${parsed.surveyId ? `, survey ${parsed.surveyId}` : ''}) — flying to Frame 1.`,
         `Path loaded (${parsed.samples.length} frames) — flying to start`
       );
     } catch (err: any) {
@@ -1834,6 +1874,7 @@ let cameraPathRemove: (() => void) | null = null;
     const path = loadedRenderPath;
     const total = path.samples.length;
     const [targetW, targetH] = path.resolution;
+    const cleanRender = chkRenderClean ? chkRenderClean.checked : renderPathCleanRender;
     const container = el<HTMLDivElement>('cesium-container');
     if (!container) return;
 
@@ -1841,10 +1882,24 @@ let cameraPathRemove: (() => void) | null = null;
     isRenderingPath = true;
     renderPathCancelled = false;
     clearRenderZipParts();
-    renderPathEntities.forEach((ent) => {
-      ent.show = false;
-    });
-    setMapLabelsTemporarilyHidden(true);
+
+    // When Clean render is ON, hide all helper graphics (Geo-Box lines/corners/TOP/BASE pins,
+    // render-path preview line/START/END markers, measurement entities, and map labels) during
+    // frame capture only, while preserving the splat overlay and data attribution in every frame.
+    const savedHelperEntityStates: Array<{ ent: any; show: boolean }> = [];
+    if (cleanRender) {
+      const helperEntities = [
+        ...geoBoxEntities,
+        ...geoBoxPreviewEntities,
+        ...renderPathEntities,
+        ...measureEntities,
+      ];
+      for (const ent of helperEntities) {
+        savedHelperEntityStates.push({ ent, show: ent.show !== false });
+        ent.show = false;
+      }
+      setMapLabelsTemporarilyHidden(true);
+    }
     updateRenderPathButtons();
     setFlightMode('explore');
 
@@ -2172,6 +2227,13 @@ let cameraPathRemove: (() => void) | null = null;
         viewer.camera.frustum.fov = savedFov;
       }
 
+      if (cleanRender) {
+        for (const { ent, show } of savedHelperEntityStates) {
+          ent.show = show;
+        }
+        setMapLabelsTemporarilyHidden(false);
+      }
+
       viewer.useDefaultRenderLoop = savedUseDefaultLoop;
       viewer.scene.render();
 
@@ -2182,10 +2244,6 @@ let cameraPathRemove: (() => void) | null = null;
         renderProgressOverlay.classList.add('hidden');
         renderProgressOverlay.classList.remove('flex');
       }
-      renderPathEntities.forEach((ent) => {
-        ent.show = true;
-      });
-      setMapLabelsTemporarilyHidden(false);
       isRenderingPath = false;
     }
 
@@ -2210,7 +2268,8 @@ let cameraPathRemove: (() => void) | null = null;
       const renderLog = {
         frameCount: renderedFrames,
         fps: path.fps,
-        resolution: path.resolution,
+        resolution: [targetW, targetH] as [number, number],
+        cleanRender,
         timeouts,
         fovRad: firstFovRad,
         fovDeg: firstFovDeg,
@@ -3502,9 +3561,10 @@ let cameraPathRemove: (() => void) | null = null;
 
   function loadGeoBoxRigIntoRenderPath(): void {
     if (!geoBox || !viewer) return;
-    const canvas = viewer.scene.canvas as HTMLCanvasElement;
-    const targetW = canvas.width || 1280;
-    const targetH = canvas.height || 720;
+    const [targetW, targetH] = resolveEffectiveRenderResolution({
+      pathJson: null,
+      dropdownOverride: renderPathResolutionOverride,
+    });
     const poses = computeGeoBoxCaptureRig(geoBox, geoBoxCaptureViews, [targetW, targetH]);
     const m = computeGeoBoxMetrics(geoBox);
     const slug =
@@ -7142,6 +7202,18 @@ let cameraPathRemove: (() => void) | null = null;
 
     // Offline Render Path Controls
     updateRenderPathButtons();
+    selectRenderPathResolution?.addEventListener('change', () => {
+      const parsed = parseResolutionPresetValue(selectRenderPathResolution.value);
+      if (!parsed) return;
+      renderPathResolutionOverride = parsed;
+      if (loadedRenderPath) {
+        loadedRenderPath.resolution = [parsed[0], parsed[1]];
+        updateRenderPathStatusBadge();
+      }
+    });
+    chkRenderClean?.addEventListener('change', () => {
+      renderPathCleanRender = chkRenderClean.checked;
+    });
     el<HTMLButtonElement>('btn-load-render-path')?.addEventListener('click', () => {
       if (!renderPathFileInput || isRenderingPath) return;
       renderPathFileInput.value = '';

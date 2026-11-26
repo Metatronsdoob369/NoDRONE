@@ -596,6 +596,20 @@
             <button id="btn-path-jump" type="button" disabled class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Jump to Start</button>
             <button id="btn-path-preview" type="button" disabled data-active="false" class="chrono-pusher px-2.5 py-1 rounded-md text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap">Preview Path</button>
           </div>
+          <div class="flex items-center justify-between gap-2 pt-0.5">
+            <label for="select-render-path-resolution" class="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 min-w-0">
+              <span class="uppercase tracking-[0.08em] shrink-0">Res</span>
+              <select id="select-render-path-resolution" title="Render Path output resolution" class="glass-input rounded-md px-1.5 py-1 text-[11px] font-mono text-slate-100 bg-slate-950/80 border border-white/15 focus:outline-none cursor-pointer">
+                <option value="1280x720">1280×720</option>
+                <option value="1920x1080" selected>1920×1080</option>
+                <option value="3840x2160">3840×2160</option>
+              </select>
+            </label>
+            <label for="chk-render-clean" title="Hide Geo-Box, path preview, measurements, and map labels during frame capture while keeping splats and data attribution" class="flex items-center gap-1.5 text-[11px] font-mono text-slate-200 cursor-pointer select-none whitespace-nowrap">
+              <input id="chk-render-clean" type="checkbox" checked class="accent-emerald-400 rounded cursor-pointer" />
+              <span>Clean render</span>
+            </label>
+          </div>
           <div class="text-[10px] font-mono text-slate-400/90 leading-snug">
             Accepts: <span class="text-slate-300">camera-path.json</span> · <span class="text-slate-300">trajectory.json</span> · <span class="text-slate-300">GES .json</span> · <span class="text-slate-300">camera_matrices.json</span> · <span class="text-slate-300">splatthat-bundle.json</span>
           </div>
