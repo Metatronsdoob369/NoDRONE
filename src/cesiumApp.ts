@@ -234,6 +234,212 @@ function buildStoreZipBlob(entries: ZipEntryInput[]): Blob {
   return new Blob([...localParts, ...centralParts, eocd], { type: 'application/zip' });
 }
 
+let cleanRenderActive = false;
+
+export function isCleanRenderActive(): boolean {
+  return cleanRenderActive;
+}
+
+export function setCleanRenderActive(active: boolean): void {
+  cleanRenderActive = active;
+}
+
+export function renderGeoBoxVolume(
+  viewerRef: any,
+  CesiumLib: any,
+  south: number,
+  north: number,
+  west: number,
+  east: number,
+  baseAlt: number,
+  ceilingAlt: number,
+  targetList: any[],
+  options: { interactive: boolean; show: boolean; labelText?: string }
+): void {
+  if (viewerRef?.entities) {
+    targetList.forEach((ent) => viewerRef.entities.remove(ent));
+  }
+  targetList.length = 0;
+  if (!viewerRef?.entities || !options.show || cleanRenderActive) return;
+
+  const goldBright = CesiumLib.Color.fromCssColorString('#f3dc9f');
+  const goldMid = CesiumLib.Color.fromCssColorString('#d4af63');
+  const fillAlpha = options.interactive ? 0.14 : 0.1;
+
+  const baseCorners = [
+    CesiumLib.Cartesian3.fromDegrees(west, south, baseAlt),
+    CesiumLib.Cartesian3.fromDegrees(east, south, baseAlt),
+    CesiumLib.Cartesian3.fromDegrees(east, north, baseAlt),
+    CesiumLib.Cartesian3.fromDegrees(west, north, baseAlt),
+  ];
+  const topCorners = [
+    CesiumLib.Cartesian3.fromDegrees(west, south, ceilingAlt),
+    CesiumLib.Cartesian3.fromDegrees(east, south, ceilingAlt),
+    CesiumLib.Cartesian3.fromDegrees(east, north, ceilingAlt),
+    CesiumLib.Cartesian3.fromDegrees(west, north, ceilingAlt),
+  ];
+
+  // Translucent 3D extruded bounding volume
+  targetList.push(
+    viewerRef.entities.add({
+      polygon: {
+        hierarchy: new CesiumLib.PolygonHierarchy(baseCorners),
+        height: baseAlt,
+        extrudedHeight: ceilingAlt,
+        material: goldMid.withAlpha(fillAlpha),
+        outline: true,
+        outlineColor: goldBright.withAlpha(0.82),
+        outlineWidth: 1.5,
+      },
+    })
+  );
+
+  // Crisp top perimeter ring
+  targetList.push(
+    viewerRef.entities.add({
+      polyline: {
+        positions: [...topCorners, topCorners[0]],
+        width: 2.2,
+        material: goldBright,
+        depthFailMaterial: goldBright.withAlpha(0.35),
+      },
+    })
+  );
+
+  // Crisp base perimeter ring
+  targetList.push(
+    viewerRef.entities.add({
+      polyline: {
+        positions: [...baseCorners, baseCorners[0]],
+        width: 1.8,
+        material: goldMid.withAlpha(0.85),
+        depthFailMaterial: goldMid.withAlpha(0.3),
+      },
+    })
+  );
+
+  // 4 vertical corner pillars
+  for (let i = 0; i < 4; i++) {
+    targetList.push(
+      viewerRef.entities.add({
+        polyline: {
+          positions: [baseCorners[i], topCorners[i]],
+          width: 1.6,
+          material: goldBright.withAlpha(0.75),
+          depthFailMaterial: goldMid.withAlpha(0.28),
+        },
+      })
+    );
+  }
+
+  // Interactive corner drag handles (SW, SE, NE, NW) + vertical pull handles (TOP, BASE)
+  if (options.interactive) {
+    const centerLat = (south + north) * 0.5;
+    const centerLon = (west + east) * 0.5;
+    const baseCenterPos = CesiumLib.Cartesian3.fromDegrees(centerLon, centerLat, baseAlt);
+    const topCenterPos = CesiumLib.Cartesian3.fromDegrees(centerLon, centerLat, ceilingAlt);
+    const skyCyan = CesiumLib.Color.fromCssColorString('#7dd3fc');
+    const warmAmber = CesiumLib.Color.fromCssColorString('#fbbf24');
+
+    // Subtle vertical elevation spine connecting BASE and TOP handles
+    targetList.push(
+      viewerRef.entities.add({
+        polyline: {
+          positions: [baseCenterPos, topCenterPos],
+          width: 1.5,
+          material: new CesiumLib.PolylineDashMaterialProperty({
+            color: skyCyan.withAlpha(0.75),
+            dashLength: 10,
+          }),
+          depthFailMaterial: skyCyan.withAlpha(0.25),
+        },
+      })
+    );
+
+    // Vertical Ceiling pull handle (↕ TOP)
+    targetList.push(
+      viewerRef.entities.add({
+        position: topCenterPos,
+        properties: { geoBoxCorner: 'top' },
+        point: {
+          pixelSize: 13,
+          color: skyCyan,
+          outlineColor: CesiumLib.Color.fromCssColorString('#0b0f17'),
+          outlineWidth: 2.5,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+        label: {
+          text: options.labelText ? `↕ TOP · ${options.labelText}` : '↕ TOP',
+          font: '600 11px "JetBrains Mono", monospace',
+          fillColor: CesiumLib.Color.fromCssColorString('#e0f2fe'),
+          showBackground: true,
+          backgroundColor: CesiumLib.Color.fromCssColorString('#0b0f17').withAlpha(0.84),
+          backgroundPadding: new CesiumLib.Cartesian2(8, 4),
+          pixelOffset: new CesiumLib.Cartesian2(0, -18),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      })
+    );
+
+    // Vertical Base Offset pull handle (↕ BASE)
+    targetList.push(
+      viewerRef.entities.add({
+        position: baseCenterPos,
+        properties: { geoBoxCorner: 'base' },
+        point: {
+          pixelSize: 11,
+          color: warmAmber,
+          outlineColor: CesiumLib.Color.fromCssColorString('#0b0f17'),
+          outlineWidth: 2,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+        label: {
+          text: '↕ BASE',
+          font: '600 10px "JetBrains Mono", monospace',
+          fillColor: warmAmber,
+          outlineColor: CesiumLib.Color.BLACK,
+          outlineWidth: 2,
+          style: CesiumLib.LabelStyle.FILL_AND_OUTLINE,
+          pixelOffset: new CesiumLib.Cartesian2(0, 16),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      })
+    );
+
+    const cornerDefs: Array<{ key: 'sw' | 'se' | 'ne' | 'nw'; label: string; pos: any }> = [
+      { key: 'sw', label: 'SW', pos: topCorners[0] },
+      { key: 'se', label: 'SE', pos: topCorners[1] },
+      { key: 'ne', label: 'NE', pos: topCorners[2] },
+      { key: 'nw', label: 'NW', pos: topCorners[3] },
+    ];
+    for (const c of cornerDefs) {
+      targetList.push(
+        viewerRef.entities.add({
+          position: c.pos,
+          properties: { geoBoxCorner: c.key },
+          point: {
+            pixelSize: 11,
+            color: goldBright,
+            outlineColor: CesiumLib.Color.fromCssColorString('#0b0f17'),
+            outlineWidth: 2,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          label: {
+            text: c.label,
+            font: '600 10px "JetBrains Mono", monospace',
+            fillColor: goldBright,
+            outlineColor: CesiumLib.Color.BLACK,
+            outlineWidth: 2,
+            style: CesiumLib.LabelStyle.FILL_AND_OUTLINE,
+            pixelOffset: new CesiumLib.Cartesian2(0, -14),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        })
+      );
+    }
+  }
+}
+
 export function initNoDroneCesiumApp(): NoDroneController | null {
   const Cesium = window.Cesium;
   if (!Cesium) {
@@ -1203,6 +1409,7 @@ let cameraPathRemove: (() => void) | null = null;
 
   function renderLoadedPathOverlay(): void {
     clearRenderPathOverlay();
+    if (cleanRenderActive) return;
     if (!viewer?.entities || !loadedRenderPath || loadedRenderPath.samples.length === 0) return;
 
     const samples = loadedRenderPath.samples;
@@ -1864,6 +2071,40 @@ let cameraPathRemove: (() => void) | null = null;
     ctx.restore();
   }
 
+  function getAllHelperEntities(): any[] {
+    return [
+      ...geoBoxEntities,
+      ...geoBoxPreviewEntities,
+      ...renderPathEntities,
+      ...measureEntities,
+    ];
+  }
+
+  function hideAllHelperGraphicsForCleanRender(): void {
+    for (const ent of getAllHelperEntities()) {
+      ent.show = false;
+    }
+    setMapLabelsTemporarilyHidden(true);
+  }
+
+  function countVisibleHelperEntities(): number {
+    let visibleCount = 0;
+    for (const ent of getAllHelperEntities()) {
+      if (ent && ent.show !== false) {
+        visibleCount += 1;
+      }
+    }
+    for (const item of mapLabelEntities) {
+      if (item?.entity && item.entity.show !== false) {
+        visibleCount += 1;
+      }
+    }
+    if (mapLabelsImageryLayer && mapLabelsImageryLayer.show !== false) {
+      visibleCount += 1;
+    }
+    return visibleCount;
+  }
+
   async function renderLoadedPathFrames(dirHandle?: any): Promise<void> {
     if (!viewer?.scene || !loadedRenderPath || isRenderingPath) return;
     if (isRecording) {
@@ -1883,23 +2124,9 @@ let cameraPathRemove: (() => void) | null = null;
     renderPathCancelled = false;
     clearRenderZipParts();
 
-    // When Clean render is ON, hide all helper graphics (Geo-Box lines/corners/TOP/BASE pins,
-    // render-path preview line/START/END markers, measurement entities, and map labels) during
-    // frame capture only, while preserving the splat overlay and data attribution in every frame.
-    const savedHelperEntityStates: Array<{ ent: any; show: boolean }> = [];
-    if (cleanRender) {
-      const helperEntities = [
-        ...geoBoxEntities,
-        ...geoBoxPreviewEntities,
-        ...renderPathEntities,
-        ...measureEntities,
-      ];
-      for (const ent of helperEntities) {
-        savedHelperEntityStates.push({ ent, show: ent.show !== false });
-        ent.show = false;
-      }
-      setMapLabelsTemporarilyHidden(true);
-    }
+    const savedHelperEntityStates: Array<{ ent: any; show: boolean }> = cleanRender
+      ? getAllHelperEntities().map((ent) => ({ ent, show: ent.show !== false }))
+      : [];
     updateRenderPathButtons();
     setFlightMode('explore');
 
@@ -1973,6 +2200,7 @@ let cameraPathRemove: (() => void) | null = null;
     const perFrameFovRad: number[] = [];
     const perFrameFovDeg: number[] = [];
     const perFrameSplatCount: number[] = [];
+    const helperEntitiesVisibleAtCapture: number[] = [];
     let anyOverlaySplats = false;
     const chunkEntries: ZipEntryInput[] = [];
     let partIndex = 1;
@@ -2010,6 +2238,12 @@ let cameraPathRemove: (() => void) | null = null;
     };
 
     try {
+      if (cleanRender) {
+        cleanRenderActive = true;
+        hideAllHelperGraphicsForCleanRender();
+        viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
+      }
+
       // Hide app HUD panels and show floating progress/cancel bar (keep Cesium/Google credits visible)
       for (const { node } of savedHudDisplays) {
         node.style.display = 'none';
@@ -2131,7 +2365,16 @@ let cameraPathRemove: (() => void) | null = null;
           Number.isFinite(appliedFov) ? Number(Cesium.Math.toDegrees(appliedFov).toFixed(3)) : 0
         );
 
+        // Re-hide every helper entity + map labels right before capture when Clean render is ON,
+        // flush EntityVisualizer updates so Cesium hides entity primitives even with useDefaultRenderLoop = false,
+        // then render the scene once and capture.
+        if (cleanRender) {
+          hideAllHelperGraphicsForCleanRender();
+        }
+        helperEntitiesVisibleAtCapture.push(countVisibleHelperEntities());
+
         // Final render immediately before reading WebGL backbuffer, then sync overlay splat canvas
+        viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
         viewer.scene.render();
         const overlayCanvas = splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null;
         const overlayStats = splatOverlay?.getActiveSplatStats();
@@ -2227,13 +2470,17 @@ let cameraPathRemove: (() => void) | null = null;
         viewer.camera.frustum.fov = savedFov;
       }
 
+      cleanRenderActive = false;
       if (cleanRender) {
         for (const { ent, show } of savedHelperEntityStates) {
           ent.show = show;
         }
         setMapLabelsTemporarilyHidden(false);
+        refreshGeoBoxGraphics();
+        renderLoadedPathOverlay();
       }
 
+      viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
       viewer.useDefaultRenderLoop = savedUseDefaultLoop;
       viewer.scene.render();
 
@@ -2270,6 +2517,7 @@ let cameraPathRemove: (() => void) | null = null;
         fps: path.fps,
         resolution: [targetW, targetH] as [number, number],
         cleanRender,
+        helperEntitiesVisibleAtCapture,
         timeouts,
         fovRad: firstFovRad,
         fovDeg: firstFovDeg,
@@ -2608,197 +2856,6 @@ let cameraPathRemove: (() => void) | null = null;
     list.length = 0;
   }
 
-  function renderGeoBoxVolume(
-    south: number,
-    north: number,
-    west: number,
-    east: number,
-    baseAlt: number,
-    ceilingAlt: number,
-    targetList: any[],
-    options: { interactive: boolean; show: boolean; labelText?: string }
-  ): void {
-    clearGeoBoxEntities(targetList);
-    if (!viewer?.entities || !options.show) return;
-
-    const goldBright = Cesium.Color.fromCssColorString('#f3dc9f');
-    const goldMid = Cesium.Color.fromCssColorString('#d4af63');
-    const fillAlpha = options.interactive ? 0.14 : 0.1;
-
-    const baseCorners = [
-      Cesium.Cartesian3.fromDegrees(west, south, baseAlt),
-      Cesium.Cartesian3.fromDegrees(east, south, baseAlt),
-      Cesium.Cartesian3.fromDegrees(east, north, baseAlt),
-      Cesium.Cartesian3.fromDegrees(west, north, baseAlt),
-    ];
-    const topCorners = [
-      Cesium.Cartesian3.fromDegrees(west, south, ceilingAlt),
-      Cesium.Cartesian3.fromDegrees(east, south, ceilingAlt),
-      Cesium.Cartesian3.fromDegrees(east, north, ceilingAlt),
-      Cesium.Cartesian3.fromDegrees(west, north, ceilingAlt),
-    ];
-
-    // Translucent 3D extruded bounding volume
-    targetList.push(
-      viewer.entities.add({
-        polygon: {
-          hierarchy: new Cesium.PolygonHierarchy(baseCorners),
-          height: baseAlt,
-          extrudedHeight: ceilingAlt,
-          material: goldMid.withAlpha(fillAlpha),
-          outline: true,
-          outlineColor: goldBright.withAlpha(0.82),
-          outlineWidth: 1.5,
-        },
-      })
-    );
-
-    // Crisp top perimeter ring
-    targetList.push(
-      viewer.entities.add({
-        polyline: {
-          positions: [...topCorners, topCorners[0]],
-          width: 2.2,
-          material: goldBright,
-          depthFailMaterial: goldBright.withAlpha(0.35),
-        },
-      })
-    );
-
-    // Crisp base perimeter ring
-    targetList.push(
-      viewer.entities.add({
-        polyline: {
-          positions: [...baseCorners, baseCorners[0]],
-          width: 1.8,
-          material: goldMid.withAlpha(0.85),
-          depthFailMaterial: goldMid.withAlpha(0.3),
-        },
-      })
-    );
-
-    // 4 vertical corner pillars
-    for (let i = 0; i < 4; i++) {
-      targetList.push(
-        viewer.entities.add({
-          polyline: {
-            positions: [baseCorners[i], topCorners[i]],
-            width: 1.6,
-            material: goldBright.withAlpha(0.75),
-            depthFailMaterial: goldMid.withAlpha(0.28),
-          },
-        })
-      );
-    }
-
-    // Interactive corner drag handles (SW, SE, NE, NW) + vertical pull handles (TOP, BASE)
-    if (options.interactive) {
-      const centerLat = (south + north) * 0.5;
-      const centerLon = (west + east) * 0.5;
-      const baseCenterPos = Cesium.Cartesian3.fromDegrees(centerLon, centerLat, baseAlt);
-      const topCenterPos = Cesium.Cartesian3.fromDegrees(centerLon, centerLat, ceilingAlt);
-      const skyCyan = Cesium.Color.fromCssColorString('#7dd3fc');
-      const warmAmber = Cesium.Color.fromCssColorString('#fbbf24');
-
-      // Subtle vertical elevation spine connecting BASE and TOP handles
-      targetList.push(
-        viewer.entities.add({
-          polyline: {
-            positions: [baseCenterPos, topCenterPos],
-            width: 1.5,
-            material: new Cesium.PolylineDashMaterialProperty({
-              color: skyCyan.withAlpha(0.75),
-              dashLength: 10,
-            }),
-            depthFailMaterial: skyCyan.withAlpha(0.25),
-          },
-        })
-      );
-
-      // Vertical Ceiling pull handle (↕ TOP)
-      targetList.push(
-        viewer.entities.add({
-          position: topCenterPos,
-          properties: { geoBoxCorner: 'top' },
-          point: {
-            pixelSize: 13,
-            color: skyCyan,
-            outlineColor: Cesium.Color.fromCssColorString('#0b0f17'),
-            outlineWidth: 2.5,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          },
-          label: {
-            text: options.labelText ? `↕ TOP · ${options.labelText}` : '↕ TOP',
-            font: '600 11px "JetBrains Mono", monospace',
-            fillColor: Cesium.Color.fromCssColorString('#e0f2fe'),
-            showBackground: true,
-            backgroundColor: Cesium.Color.fromCssColorString('#0b0f17').withAlpha(0.84),
-            backgroundPadding: new Cesium.Cartesian2(8, 4),
-            pixelOffset: new Cesium.Cartesian2(0, -18),
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          },
-        })
-      );
-
-      // Vertical Base Offset pull handle (↕ BASE)
-      targetList.push(
-        viewer.entities.add({
-          position: baseCenterPos,
-          properties: { geoBoxCorner: 'base' },
-          point: {
-            pixelSize: 11,
-            color: warmAmber,
-            outlineColor: Cesium.Color.fromCssColorString('#0b0f17'),
-            outlineWidth: 2,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          },
-          label: {
-            text: '↕ BASE',
-            font: '600 10px "JetBrains Mono", monospace',
-            fillColor: warmAmber,
-            outlineColor: Cesium.Color.BLACK,
-            outlineWidth: 2,
-            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            pixelOffset: new Cesium.Cartesian2(0, 16),
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          },
-        })
-      );
-
-      const cornerDefs: Array<{ key: 'sw' | 'se' | 'ne' | 'nw'; label: string; pos: any }> = [
-        { key: 'sw', label: 'SW', pos: topCorners[0] },
-        { key: 'se', label: 'SE', pos: topCorners[1] },
-        { key: 'ne', label: 'NE', pos: topCorners[2] },
-        { key: 'nw', label: 'NW', pos: topCorners[3] },
-      ];
-      for (const c of cornerDefs) {
-        targetList.push(
-          viewer.entities.add({
-            position: c.pos,
-            properties: { geoBoxCorner: c.key },
-            point: {
-              pixelSize: 11,
-              color: goldBright,
-              outlineColor: Cesium.Color.fromCssColorString('#0b0f17'),
-              outlineWidth: 2,
-              disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            },
-            label: {
-              text: c.label,
-              font: '600 10px "JetBrains Mono", monospace',
-              fillColor: goldBright,
-              outlineColor: Cesium.Color.BLACK,
-              outlineWidth: 2,
-              style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-              pixelOffset: new Cesium.Cartesian2(0, -14),
-              disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            },
-          })
-        );
-      }
-    }
-  }
-
   function syncGeoBoxUI(): void {
     const statusEl = el<HTMLSpanElement>('box-status');
     const dimEl = el<HTMLDivElement>('box-dim-readout');
@@ -2934,6 +2991,8 @@ let cameraPathRemove: (() => void) | null = null;
     }
     const m = computeGeoBoxMetrics(geoBox);
     renderGeoBoxVolume(
+      viewer,
+      Cesium,
       geoBox.south,
       geoBox.north,
       geoBox.west,
@@ -3218,7 +3277,7 @@ let cameraPathRemove: (() => void) | null = null;
       const baseOffset = Number(el<HTMLInputElement>('slider-box-base')?.value ?? 0);
       const boxHeight = Number(el<HTMLInputElement>('slider-box-height')?.value ?? 25);
       const baseAlt = Math.min(geoBoxAnchor.height, pt.height) + (Number.isFinite(baseOffset) ? baseOffset : 0);
-      renderGeoBoxVolume(south, north, west, east, baseAlt, baseAlt + boxHeight, geoBoxPreviewEntities, {
+      renderGeoBoxVolume(viewer, Cesium, south, north, west, east, baseAlt, baseAlt + boxHeight, geoBoxPreviewEntities, {
         interactive: false,
         show: true,
       });

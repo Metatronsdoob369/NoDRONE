@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isCleanRenderActive,
+  renderGeoBoxVolume,
+  setCleanRenderActive,
+} from '../cesiumApp';
+import {
   DEFAULT_RENDER_RESOLUTION,
   RENDER_RESOLUTION_PRESETS,
   extractPathJsonRenderResolution,
@@ -97,5 +102,100 @@ describe('Render Path resolution defaults and overrides', () => {
     expect(parseResolutionPresetValue('3840×2160')).toEqual([3840, 2160]);
     expect(parseResolutionPresetValue('invalid')).toBeNull();
     expect(formatResolutionValue([1920, 1080])).toBe('1920x1080');
+  });
+});
+
+function createMockCesium() {
+  const makeColor = (css: string) => ({
+    css,
+    withAlpha(alpha: number) {
+      return { css, alpha };
+    },
+  });
+  return {
+    Color: {
+      BLACK: makeColor('#000000'),
+      fromCssColorString: (css: string) => makeColor(css),
+    },
+    Cartesian3: {
+      fromDegrees: (lon: number, lat: number, h: number) => ({ lon, lat, h }),
+    },
+    Cartesian2: class {
+      constructor(public x: number, public y: number) {}
+    },
+    PolygonHierarchy: class {
+      constructor(public positions: unknown[]) {}
+    },
+    PolylineDashMaterialProperty: class {
+      constructor(public opts: unknown) {}
+    },
+    LabelStyle: {
+      FILL_AND_OUTLINE: 'FILL_AND_OUTLINE',
+    },
+  };
+}
+
+function createMockViewer() {
+  const stored: Array<{ show: boolean; spec: unknown }> = [];
+  return {
+    stored,
+    entities: {
+      add(spec: Record<string, unknown>) {
+        const ent = { show: spec.show !== false, spec };
+        stored.push(ent);
+        return ent;
+      },
+      remove(ent: { show: boolean; spec: unknown }) {
+        const idx = stored.indexOf(ent);
+        if (idx >= 0) stored.splice(idx, 1);
+      },
+    },
+  };
+}
+
+describe('cleanRenderActive flag rule', () => {
+  it('renderGeoBoxVolume creates no visible entities while cleanRenderActive is true', () => {
+    const mockCesium = createMockCesium();
+    const mockViewer = createMockViewer();
+    const targetList: Array<{ show: boolean; spec: unknown }> = [];
+
+    try {
+      setCleanRenderActive(false);
+      expect(isCleanRenderActive()).toBe(false);
+
+      // Normal mode: creates visible Geo-Box entities (volume, rings, pillars, TOP/BASE pins, SW/SE/NE/NW corners)
+      renderGeoBoxVolume(mockViewer, mockCesium, 33.5, 33.501, -82.023, -82.022, 100, 160, targetList, {
+        interactive: true,
+        show: true,
+        labelText: '90m × 110m × 60m',
+      });
+      expect(targetList.length).toBeGreaterThan(0);
+      expect(targetList.filter((e) => e.show !== false).length).toBe(targetList.length);
+
+      // Clean render active: clears existing entities and creates no visible entities
+      setCleanRenderActive(true);
+      expect(isCleanRenderActive()).toBe(true);
+
+      renderGeoBoxVolume(mockViewer, mockCesium, 33.5, 33.501, -82.023, -82.022, 100, 160, targetList, {
+        interactive: true,
+        show: true,
+        labelText: '90m × 110m × 60m',
+      });
+      expect(targetList.filter((e) => e.show !== false)).toHaveLength(0);
+      expect(targetList).toHaveLength(0);
+      expect(mockViewer.stored.filter((e) => e.show !== false)).toHaveLength(0);
+
+      // After clean render ends: entities are rebuilt and visible again
+      setCleanRenderActive(false);
+      renderGeoBoxVolume(mockViewer, mockCesium, 33.5, 33.501, -82.023, -82.022, 100, 160, targetList, {
+        interactive: true,
+        show: true,
+        labelText: '90m × 110m × 60m',
+      });
+      expect(targetList.length).toBeGreaterThan(0);
+      expect(targetList.every((e) => e.show !== false)).toBe(true);
+    } finally {
+      setCleanRenderActive(false);
+    }
   });
 });
