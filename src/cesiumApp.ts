@@ -91,6 +91,7 @@ import {
   type OrbitRingRole,
 } from './orbitRig';
 import {
+  applyCaptureGoogleTilesetCache,
   applyTrainingModeSceneSettings,
   buildCaptureRenderSettingsJson,
   CAPTURE_NETWORK_IDLE_MS,
@@ -98,14 +99,18 @@ import {
   collectUniqueTilesets,
   formatTimeoutWarningToast,
   parseTrainingModeSSE,
+  readCaptureTilesetStats,
+  restoreCaptureGoogleTilesetCache,
   restoreTrainingModeSceneSettings,
   settleViewWithRetry,
   TRAINING_MODE_SSE,
   waitForSceneSettle,
   type CaptureSettleResult,
+  type CaptureTilesetCacheSnapshot,
   type SettleReason,
   type TrainingModeSceneSnapshot,
   type TrainingModeSSE,
+  type ViewTileStatsSnapshot,
 } from './captureBundleTraining';
 
 // Optional: Paste a read-only public Cesium ion token here if embedding publicly
@@ -2208,7 +2213,9 @@ let cameraPathRemove: (() => void) | null = null;
     const perFrameFovRad: number[] = [];
     const perFrameFovDeg: number[] = [];
     const perFrameSplatCount: number[] = [];
+    const perViewTileStats: ViewTileStatsSnapshot[] = [];
     const helperEntitiesVisibleAtCapture: number[] = [];
+    let googleCacheSnapshot: CaptureTilesetCacheSnapshot | null = null;
     let anyOverlaySplats = false;
     const chunkEntries: ZipEntryInput[] = [];
     let partIndex = 1;
@@ -2247,6 +2254,7 @@ let cameraPathRemove: (() => void) | null = null;
     };
 
     try {
+      googleCacheSnapshot = applyCaptureGoogleTilesetCache(google3DTileset);
       if (cleanRender) {
         cleanRenderActive = true;
         hideAllHelperGraphicsForCleanRender();
@@ -2398,6 +2406,12 @@ let cameraPathRemove: (() => void) | null = null;
         // Final render immediately before reading WebGL backbuffer, then sync overlay splat canvas
         viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
         viewer.scene.render();
+        perViewTileStats.push(
+          readCaptureTilesetStats(
+            viewer,
+            [google3DTileset, ...activeTilesets.map((t) => t.tileset)].filter(Boolean)
+          )
+        );
         const overlayCanvas = splatOverlay?.renderForCapture(viewer, targetW, targetH) ?? null;
         const overlayStats = splatOverlay?.getActiveSplatStats();
         const frameSplatCount =
@@ -2489,6 +2503,7 @@ let cameraPathRemove: (() => void) | null = null;
         viewer.camera.frustum.fov = savedFov;
       }
 
+      restoreCaptureGoogleTilesetCache(googleCacheSnapshot);
       cleanRenderActive = false;
       if (cleanRender) {
         for (const { ent, show } of savedHelperEntityStates) {
@@ -2545,6 +2560,7 @@ let cameraPathRemove: (() => void) | null = null;
         perFrameFovRad,
         perFrameFovDeg,
         perFrameWaitMs,
+        perViewTileStats,
         overlaySplats: anyOverlaySplats,
         overlaySplatCount: maxOverlaySplatCount,
         perFrameSplatCount,
@@ -2615,7 +2631,10 @@ let cameraPathRemove: (() => void) | null = null;
     const snapshotPitch = viewer.camera.pitch;
     const snapshotRoll = viewer.camera.roll;
 
+    let googleCacheSnapshot: CaptureTilesetCacheSnapshot | null = null;
+
     try {
+      googleCacheSnapshot = applyCaptureGoogleTilesetCache(google3DTileset);
       viewer.useDefaultRenderLoop = false;
 
       const settle = await settleViewWithRetry({
@@ -2692,6 +2711,7 @@ let cameraPathRemove: (() => void) | null = null;
       showToast('Snapshot blocked by cross-origin imagery.', 'error');
       return false;
     } finally {
+      restoreCaptureGoogleTilesetCache(googleCacheSnapshot);
       viewer.useDefaultRenderLoop = savedUseDefaultLoop;
       if (savedUseDefaultLoop) {
         viewer.scene.render();
@@ -4153,6 +4173,7 @@ let cameraPathRemove: (() => void) | null = null;
       (ent) => ({ ent, show: ent.show !== false })
     );
     let trainingSnapshot: TrainingModeSceneSnapshot | null = null;
+    let googleCacheSnapshot: CaptureTilesetCacheSnapshot | null = null;
 
     const savedCanvasStyle = {
       width: canvas.style.width,
@@ -4205,6 +4226,7 @@ let cameraPathRemove: (() => void) | null = null;
       timedOutViews: string[];
       settledBy: SettleReason[];
       perFrameWaitMs: number[];
+      perViewTileStats: ViewTileStatsSnapshot[];
       perFrameFovRad: number[];
       perFrameFovDeg: number[];
       perFrameSplatCount: number[];
@@ -4218,6 +4240,7 @@ let cameraPathRemove: (() => void) | null = null;
       timedOutViews: [],
       settledBy: [],
       perFrameWaitMs: [],
+      perViewTileStats: [],
       perFrameFovRad: [],
       perFrameFovDeg: [],
       perFrameSplatCount: [],
@@ -4241,6 +4264,9 @@ let cameraPathRemove: (() => void) | null = null;
       cleanRenderActive = true;
       hideAllHelperGraphicsForCleanRender();
       viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
+
+      // Raise Google 3D tileset cache limits (1.5 GB cache, 1 GB overflow) during capture to avoid eviction thrashing
+      googleCacheSnapshot = applyCaptureGoogleTilesetCache(google3DTileset);
 
       // Apply Training mode deterministic scene toggles, selected SSE, and Google 3D dynamicScreenSpaceError
       const extraTilesets = [google3DTileset, ...activeTilesets.map((t) => t.tileset)].filter(
@@ -4382,6 +4408,7 @@ let cameraPathRemove: (() => void) | null = null;
           stats.helperEntitiesVisibleAtCapture.push(countVisibleHelperEntities());
           viewer.dataSourceDisplay?.update?.(viewer.clock.currentTime);
           viewer.scene.render();
+          stats.perViewTileStats.push(readCaptureTilesetStats(viewer, extraTilesets));
 
           // Do NOT composite splat overlay into Capture Bundle frames while Training mode is ON
           const overlayCanvas = trainingMode
@@ -4454,6 +4481,7 @@ let cameraPathRemove: (() => void) | null = null;
             perFrameFovRad: stats.perFrameFovRad,
             perFrameFovDeg: stats.perFrameFovDeg,
             perFrameWaitMs: stats.perFrameWaitMs,
+            perViewTileStats: stats.perViewTileStats,
             frameFileNames: stats.frameFileNames,
             overlaySplats: stats.anyOverlaySplats,
             overlaySplatCount: maxOverlaySplatCount,
@@ -4673,6 +4701,7 @@ let cameraPathRemove: (() => void) | null = null;
       }
 
       restoreTrainingModeSceneSettings(viewer, trainingSnapshot);
+      restoreCaptureGoogleTilesetCache(googleCacheSnapshot);
 
       cleanRenderActive = false;
       if (geoBox) {

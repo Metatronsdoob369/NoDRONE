@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyCaptureGoogleTilesetCache,
   applyTrainingModeSceneSettings,
   buildCaptureRenderSettingsJson,
+  CAPTURE_GOOGLE_CACHE_BYTES,
+  CAPTURE_GOOGLE_MAX_CACHE_OVERFLOW_BYTES,
   CAPTURE_NETWORK_IDLE_MS,
   CAPTURE_SETTLE_TIMEOUT_MS,
   DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS,
   formatTimeoutWarningToast,
   getCaptureSettleTimeoutMs,
   parseTrainingModeSSE,
+  readCaptureTilesetStats,
+  restoreCaptureGoogleTilesetCache,
   restoreTrainingModeSceneSettings,
   settleViewWithRetry,
   TRAINING_MODE_SETTLE_TIMEOUT_MS,
@@ -227,11 +232,13 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
     expect(parseTrainingModeSSE('16')).toBe(4);
   });
 
-  it('applies Training mode toggles, default SSE=4, enables Google 3D dynamicScreenSpaceError, leaves MSAA untouched, writes render_settings.json, and restores everything cleanly', () => {
+  it('applies Training mode toggles (fogEnabled=true, fogRenderable=false), raises Google 3D cache limits, enables dynamicScreenSpaceError, leaves MSAA untouched, writes render_settings.json, and restores everything cleanly', () => {
     const googleTileset = {
       name: 'Google 3D',
       maximumScreenSpaceError: 8,
       dynamicScreenSpaceError: false,
+      cacheBytes: 512 * 1024 * 1024,
+      maximumCacheOverflowBytes: 512 * 1024 * 1024,
     };
     const siteTileset = {
       name: 'Wanek Site',
@@ -245,7 +252,7 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
       scene: {
         msaaSamples: 4,
         skyAtmosphere: { show: true },
-        fog: { enabled: true },
+        fog: { enabled: false, renderable: true },
         sun: { show: true },
         moon: { show: true },
         skyBox: { show: true },
@@ -260,13 +267,17 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
       },
     };
 
+    const cacheSnapshot = applyCaptureGoogleTilesetCache(googleTileset);
     const snapshot = applyTrainingModeSceneSettings(viewer, [googleTileset], {
       google3DTileset: googleTileset,
     });
 
-    // Every training-mode toggle is OFF during capture
+    // Fog culling stays ON (fog.enabled = true), visible fog rendering turned OFF (fog.renderable = false)
+    expect(viewer.scene.fog.enabled).toBe(true);
+    expect(viewer.scene.fog.renderable).toBe(false);
+
+    // Other visual toggles are OFF during capture
     expect(viewer.scene.skyAtmosphere.show).toBe(false);
-    expect(viewer.scene.fog.enabled).toBe(false);
     expect(viewer.scene.sun.show).toBe(false);
     expect(viewer.scene.moon.show).toBe(false);
     expect(viewer.scene.skyBox.show).toBe(false);
@@ -277,13 +288,17 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
     // MSAA untouched
     expect(viewer.scene.msaaSamples).toBe(4);
 
+    // Google 3D cache limits raised to 1.5 GB and 1 GB
+    expect(googleTileset.cacheBytes).toBe(CAPTURE_GOOGLE_CACHE_BYTES);
+    expect(googleTileset.maximumCacheOverflowBytes).toBe(CAPTURE_GOOGLE_MAX_CACHE_OVERFLOW_BYTES);
+
     // Google 3D and all loaded tilesets set to default SSE = 4; dynamicScreenSpaceError enabled on Google 3D
     expect(googleTileset.maximumScreenSpaceError).toBe(4);
     expect(siteTileset.maximumScreenSpaceError).toBe(4);
     expect(googleTileset.dynamicScreenSpaceError).toBe(true);
     expect(siteTileset.dynamicScreenSpaceError).toBe(false);
 
-    // render_settings.json records SSE=4 and dynamicScreenSpaceError=true accurately
+    // render_settings.json records fogEnabled/fogRenderable (not "fog"), cache limits, SSE=4, and dynamicScreenSpaceError=true
     const settingsDoc = buildCaptureRenderSettingsJson({
       viewer,
       cesiumVersion: '1.124',
@@ -300,11 +315,15 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
     expect(settingsDoc.trainingMode).toBe(true);
     expect(settingsDoc.maximumScreenSpaceError).toBe(4);
     expect(settingsDoc.dynamicScreenSpaceError).toBe(true);
+    expect(settingsDoc.cacheBytes).toBe(CAPTURE_GOOGLE_CACHE_BYTES);
+    expect(settingsDoc.maximumCacheOverflowBytes).toBe(CAPTURE_GOOGLE_MAX_CACHE_OVERFLOW_BYTES);
     expect(settingsDoc.tilesetCount).toBe(2);
     expect(settingsDoc.date).toBe('2026-11-26T00:00:00.000Z');
+    expect('fog' in settingsDoc.toggles).toBe(false);
     expect(settingsDoc.toggles).toEqual({
       skyAtmosphere: false,
-      fog: false,
+      fogEnabled: true,
+      fogRenderable: false,
       sun: false,
       moon: false,
       skyBox: false,
@@ -317,11 +336,13 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
       cleanRender: true,
     });
 
-    // Restore everything after capture
+    // Restore everything after capture (including original fog.enabled=false, fog.renderable=true, and cacheBytes)
     restoreTrainingModeSceneSettings(viewer, snapshot);
+    restoreCaptureGoogleTilesetCache(cacheSnapshot);
 
     expect(viewer.scene.skyAtmosphere.show).toBe(true);
-    expect(viewer.scene.fog.enabled).toBe(true);
+    expect(viewer.scene.fog.enabled).toBe(false);
+    expect(viewer.scene.fog.renderable).toBe(true);
     expect(viewer.scene.sun.show).toBe(true);
     expect(viewer.scene.moon.show).toBe(true);
     expect(viewer.scene.skyBox.show).toBe(true);
@@ -331,19 +352,58 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
     expect(viewer.scene.msaaSamples).toBe(4);
     expect(googleTileset.maximumScreenSpaceError).toBe(8);
     expect(googleTileset.dynamicScreenSpaceError).toBe(false);
+    expect(googleTileset.cacheBytes).toBe(512 * 1024 * 1024);
+    expect(googleTileset.maximumCacheOverflowBytes).toBe(512 * 1024 * 1024);
     expect(siteTileset.maximumScreenSpaceError).toBe(12);
   });
 
-  it('applies custom Training mode SSE=8 from dropdown and records it in render_settings.json', () => {
-    const googleTileset = { maximumScreenSpaceError: 16, dynamicScreenSpaceError: false };
-    const viewer = { scene: { msaaSamples: 4, primitives: [googleTileset] } };
+  it('reads perViewTileStats (numberOfPendingRequests, numberOfTilesProcessing) across visible unique tilesets', () => {
+    const googleTileset = {
+      show: true,
+      maximumScreenSpaceError: 4,
+      statistics: { numberOfPendingRequests: 5, numberOfTilesProcessing: 2 },
+    };
+    const siteTileset = {
+      show: true,
+      maximumScreenSpaceError: 4,
+      statistics: { numberOfPendingRequests: 3, numberOfTilesProcessing: 1 },
+    };
+    const hiddenTileset = {
+      show: false,
+      maximumScreenSpaceError: 4,
+      statistics: { numberOfPendingRequests: 99, numberOfTilesProcessing: 44 },
+    };
+    const viewer = {
+      scene: {
+        primitives: [googleTileset, siteTileset, hiddenTileset],
+      },
+    };
 
+    // Passing googleTileset again in extraTilesets must NOT double-count it
+    expect(readCaptureTilesetStats(viewer, [googleTileset])).toEqual({
+      numberOfPendingRequests: 8,
+      numberOfTilesProcessing: 3,
+    });
+  });
+
+  it('applies custom Training mode SSE=8 from dropdown and records it in render_settings.json', () => {
+    const googleTileset = {
+      maximumScreenSpaceError: 16,
+      dynamicScreenSpaceError: false,
+      cacheBytes: 512 * 1024 * 1024,
+      maximumCacheOverflowBytes: 512 * 1024 * 1024,
+    };
+    const viewer = { scene: { msaaSamples: 4, fog: { enabled: true, renderable: true }, primitives: [googleTileset] } };
+
+    const cacheSnap = applyCaptureGoogleTilesetCache(googleTileset);
     const snap = applyTrainingModeSceneSettings(viewer, [googleTileset], {
       maximumScreenSpaceError: 8,
       google3DTileset: googleTileset,
     });
     expect(googleTileset.maximumScreenSpaceError).toBe(8);
     expect(googleTileset.dynamicScreenSpaceError).toBe(true);
+    expect(viewer.scene.fog.enabled).toBe(true);
+    expect(viewer.scene.fog.renderable).toBe(false);
 
     const doc = buildCaptureRenderSettingsJson({
       viewer,
@@ -356,10 +416,19 @@ describe('Capture Bundle Training mode toggles, SSE dropdown, dynamicScreenSpace
     });
     expect(doc.maximumScreenSpaceError).toBe(8);
     expect(doc.dynamicScreenSpaceError).toBe(true);
+    expect(doc.cacheBytes).toBe(CAPTURE_GOOGLE_CACHE_BYTES);
+    expect(doc.maximumCacheOverflowBytes).toBe(CAPTURE_GOOGLE_MAX_CACHE_OVERFLOW_BYTES);
+    expect(doc.toggles.fogEnabled).toBe(true);
+    expect(doc.toggles.fogRenderable).toBe(false);
 
     restoreTrainingModeSceneSettings(viewer, snap);
+    restoreCaptureGoogleTilesetCache(cacheSnap);
     expect(googleTileset.maximumScreenSpaceError).toBe(16);
     expect(googleTileset.dynamicScreenSpaceError).toBe(false);
+    expect(googleTileset.cacheBytes).toBe(512 * 1024 * 1024);
+    expect(googleTileset.maximumCacheOverflowBytes).toBe(512 * 1024 * 1024);
+    expect(viewer.scene.fog.enabled).toBe(true);
+    expect(viewer.scene.fog.renderable).toBe(true);
   });
 });
 

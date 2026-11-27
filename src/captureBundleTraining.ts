@@ -7,6 +7,21 @@ export const CAPTURE_NETWORK_IDLE_MS = 3000;
 export const TRAINING_MODE_SETTLE_TIMEOUT_MS = CAPTURE_SETTLE_TIMEOUT_MS;
 export const DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS = CAPTURE_SETTLE_TIMEOUT_MS;
 
+/** Raised Google 3D tileset cache limits applied during captures (1.5 GiB cache, 1 GiB overflow). */
+export const CAPTURE_GOOGLE_CACHE_BYTES = 1536 * 1024 * 1024;
+export const CAPTURE_GOOGLE_MAX_CACHE_OVERFLOW_BYTES = 1024 * 1024 * 1024;
+
+export interface CaptureTilesetCacheSnapshot {
+  tileset: any;
+  cacheBytes: number | null;
+  maximumCacheOverflowBytes: number | null;
+}
+
+export interface ViewTileStatsSnapshot {
+  numberOfPendingRequests: number;
+  numberOfTilesProcessing: number;
+}
+
 export type SettleReason = 'tilesLoaded' | 'idle' | 'timeout';
 
 export interface CaptureSettleResult {
@@ -313,6 +328,7 @@ export function formatTimeoutWarningToast(
 export interface TrainingModeSceneSnapshot {
   skyAtmosphereShow: boolean | null;
   fogEnabled: boolean | null;
+  fogRenderable: boolean | null;
   sunShow: boolean | null;
   moonShow: boolean | null;
   skyBoxShow: boolean | null;
@@ -331,10 +347,13 @@ export interface CaptureRenderSettingsDocument {
   trainingMode: boolean;
   maximumScreenSpaceError: number;
   dynamicScreenSpaceError: boolean;
+  cacheBytes: number | null;
+  maximumCacheOverflowBytes: number | null;
   tilesetCount: number;
   toggles: {
     skyAtmosphere: boolean;
-    fog: boolean;
+    fogEnabled: boolean;
+    fogRenderable: boolean;
     sun: boolean;
     moon: boolean;
     skyBox: boolean;
@@ -376,11 +395,98 @@ export function collectUniqueTilesets(viewer: any, extraTilesets: any[] = []): a
 }
 
 /**
+ * Raises the Google 3D tileset cache limits during captures (`cacheBytes` to 1.5 GB,
+ * `maximumCacheOverflowBytes` to 1 GB) to prevent cache eviction thrashing while
+ * streaming high-detail views. Returns a snapshot used to restore both values in `finally`.
+ */
+export function applyCaptureGoogleTilesetCache(
+  google3DTileset: any
+): CaptureTilesetCacheSnapshot | null {
+  if (!google3DTileset || typeof google3DTileset !== 'object') return null;
+
+  const snapshot: CaptureTilesetCacheSnapshot = {
+    tileset: google3DTileset,
+    cacheBytes:
+      typeof google3DTileset.cacheBytes === 'number' ? google3DTileset.cacheBytes : null,
+    maximumCacheOverflowBytes:
+      typeof google3DTileset.maximumCacheOverflowBytes === 'number'
+        ? google3DTileset.maximumCacheOverflowBytes
+        : null,
+  };
+
+  if (snapshot.cacheBytes !== null) {
+    google3DTileset.cacheBytes = Math.max(snapshot.cacheBytes, CAPTURE_GOOGLE_CACHE_BYTES);
+  } else {
+    google3DTileset.cacheBytes = CAPTURE_GOOGLE_CACHE_BYTES;
+  }
+
+  if (snapshot.maximumCacheOverflowBytes !== null) {
+    google3DTileset.maximumCacheOverflowBytes = Math.max(
+      snapshot.maximumCacheOverflowBytes,
+      CAPTURE_GOOGLE_MAX_CACHE_OVERFLOW_BYTES
+    );
+  } else {
+    google3DTileset.maximumCacheOverflowBytes = CAPTURE_GOOGLE_MAX_CACHE_OVERFLOW_BYTES;
+  }
+
+  return snapshot;
+}
+
+/**
+ * Restores `cacheBytes` and `maximumCacheOverflowBytes` saved by
+ * `applyCaptureGoogleTilesetCache`.
+ */
+export function restoreCaptureGoogleTilesetCache(
+  snapshot: CaptureTilesetCacheSnapshot | null
+): void {
+  if (!snapshot?.tileset) return;
+  if (snapshot.cacheBytes !== null) {
+    snapshot.tileset.cacheBytes = snapshot.cacheBytes;
+  }
+  if (snapshot.maximumCacheOverflowBytes !== null) {
+    snapshot.tileset.maximumCacheOverflowBytes = snapshot.maximumCacheOverflowBytes;
+  }
+}
+
+/**
+ * Reads aggregate tileset streaming statistics (`numberOfPendingRequests`,
+ * `numberOfTilesProcessing`) across all visible unique tilesets at capture time.
+ */
+export function readCaptureTilesetStats(
+  viewer: any,
+  extraTilesets: any[] = []
+): ViewTileStatsSnapshot {
+  const tilesets = collectUniqueTilesets(viewer, extraTilesets);
+  let numberOfPendingRequests = 0;
+  let numberOfTilesProcessing = 0;
+  for (const ts of tilesets) {
+    if (!ts || ts.show === false) continue;
+    const stats = ts.statistics;
+    if (!stats) continue;
+    if (
+      typeof stats.numberOfPendingRequests === 'number' &&
+      Number.isFinite(stats.numberOfPendingRequests)
+    ) {
+      numberOfPendingRequests += stats.numberOfPendingRequests;
+    }
+    if (
+      typeof stats.numberOfTilesProcessing === 'number' &&
+      Number.isFinite(stats.numberOfTilesProcessing)
+    ) {
+      numberOfTilesProcessing += stats.numberOfTilesProcessing;
+    }
+  }
+  return { numberOfPendingRequests, numberOfTilesProcessing };
+}
+
+/**
  * Applies deterministic training-mode scene overrides for Capture Bundle:
- * turns off skyAtmosphere, fog, sun, moon, skyBox, globe.enableLighting, and shadows;
- * keeps MSAA untouched; sets Google 3D and all loaded tilesets' maximumScreenSpaceError
- * to `maximumScreenSpaceError` (default 4); enables `dynamicScreenSpaceError` on the
- * Google 3D tileset so distant horizon tiles stay lower detail while the Geo-Box stays sharp.
+ * keeps `scene.fog.enabled = true` (so Cesium's fog-based distant tile culling and
+ * SSE reduction stay active) while setting `scene.fog.renderable = false` (no visible
+ * fog in pixels); turns off skyAtmosphere, sun, moon, skyBox, globe.enableLighting,
+ * and shadows; keeps MSAA untouched; sets Google 3D and all loaded tilesets'
+ * maximumScreenSpaceError to `maximumScreenSpaceError` (default 4); enables
+ * `dynamicScreenSpaceError` on the Google 3D tileset.
  * Returns a snapshot used to restore every single setting in a `finally` block.
  */
 export function applyTrainingModeSceneSettings(
@@ -396,6 +502,7 @@ export function applyTrainingModeSceneSettings(
   const snapshot: TrainingModeSceneSnapshot = {
     skyAtmosphereShow: null,
     fogEnabled: null,
+    fogRenderable: null,
     sunShow: null,
     moonShow: null,
     skyBoxShow: null,
@@ -410,9 +517,18 @@ export function applyTrainingModeSceneSettings(
     snapshot.skyAtmosphereShow = scene.skyAtmosphere.show;
     scene.skyAtmosphere.show = false;
   }
-  if (scene?.fog && typeof scene.fog.enabled === 'boolean') {
-    snapshot.fogEnabled = scene.fog.enabled;
-    scene.fog.enabled = false;
+  if (scene?.fog) {
+    if (typeof scene.fog.enabled === 'boolean') {
+      snapshot.fogEnabled = scene.fog.enabled;
+      scene.fog.enabled = true;
+    }
+    if (typeof scene.fog.renderable === 'boolean') {
+      snapshot.fogRenderable = scene.fog.renderable;
+      scene.fog.renderable = false;
+    } else {
+      snapshot.fogRenderable = true;
+      scene.fog.renderable = false;
+    }
   }
   if (scene?.sun && typeof scene.sun.show === 'boolean') {
     snapshot.sunShow = scene.sun.show;
@@ -462,8 +578,9 @@ export function applyTrainingModeSceneSettings(
 }
 
 /**
- * Restores every scene toggle, Google 3D `dynamicScreenSpaceError`, and tileset
- * `maximumScreenSpaceError` saved by `applyTrainingModeSceneSettings`. Never modifies MSAA.
+ * Restores every scene toggle, fog.enabled / fog.renderable, Google 3D
+ * `dynamicScreenSpaceError`, and tileset `maximumScreenSpaceError` saved by
+ * `applyTrainingModeSceneSettings`. Never modifies MSAA.
  */
 export function restoreTrainingModeSceneSettings(
   viewer: any,
@@ -477,6 +594,9 @@ export function restoreTrainingModeSceneSettings(
   }
   if (snapshot.fogEnabled !== null && scene?.fog) {
     scene.fog.enabled = snapshot.fogEnabled;
+  }
+  if (snapshot.fogRenderable !== null && scene?.fog) {
+    scene.fog.renderable = snapshot.fogRenderable;
   }
   if (snapshot.sunShow !== null && scene?.sun) {
     scene.sun.show = snapshot.sunShow;
@@ -527,6 +647,20 @@ export function buildCaptureRenderSettingsJson(options: {
   const msaaSamples = typeof scene?.msaaSamples === 'number' ? scene.msaaSamples : null;
   const effectiveTrainingSSE = parseTrainingModeSSE(options.trainingSSE ?? TRAINING_MODE_SSE);
   const dynamicSSE = Boolean(options.google3DTileset?.dynamicScreenSpaceError);
+  const cacheBytes =
+    typeof options.google3DTileset?.cacheBytes === 'number'
+      ? options.google3DTileset.cacheBytes
+      : null;
+  const maximumCacheOverflowBytes =
+    typeof options.google3DTileset?.maximumCacheOverflowBytes === 'number'
+      ? options.google3DTileset.maximumCacheOverflowBytes
+      : null;
+  const fogEnabled = Boolean(scene?.fog?.enabled);
+  const fogRenderable = scene?.fog
+    ? typeof scene.fog.renderable === 'boolean'
+      ? scene.fog.renderable
+      : true
+    : false;
 
   return {
     schema: 'nodrone-render-settings/1.0',
@@ -536,10 +670,13 @@ export function buildCaptureRenderSettingsJson(options: {
     trainingMode: options.trainingMode,
     maximumScreenSpaceError: options.trainingMode ? effectiveTrainingSSE : options.currentSSE,
     dynamicScreenSpaceError: dynamicSSE,
+    cacheBytes,
+    maximumCacheOverflowBytes,
     tilesetCount: tilesets.length,
     toggles: {
       skyAtmosphere: Boolean(scene?.skyAtmosphere?.show),
-      fog: Boolean(scene?.fog?.enabled),
+      fogEnabled,
+      fogRenderable,
       sun: Boolean(scene?.sun?.show),
       moon: Boolean(scene?.moon?.show),
       skyBox: Boolean(scene?.skyBox?.show),
